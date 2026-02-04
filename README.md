@@ -1,73 +1,82 @@
-# Welcome to your Lovable project
+# ColorFix
 
-## Project info
+ColorFix is a browser-based color calibration and batch correction tool for
+product photos. Use a reference color card to build a correction matrix, save
+presets for your studio lighting, and apply the correction to large batches of
+images entirely in the browser.
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+## Features
 
-## How can I edit this code?
+- Calibrate using white/grey/black or custom color points
+- Advanced multi-point correction for higher accuracy
+- Save presets locally for repeatable workflows
+- Batch process up to 100 images at once
+- Export to JPEG or PNG with configurable quality and suffixes
+- All processing happens locally for privacy
 
-There are several ways of editing your application.
+## Tech stack
 
-**Use Lovable**
+- Vite + React + TypeScript
+- Tailwind CSS + shadcn/ui
+- TanStack Query
+- JSZip for bulk downloads
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
+## Getting started
 
-Changes made via Lovable will be committed automatically to this repo.
+### Prerequisites
 
-**Use your preferred IDE**
+- Node.js 18+ and npm
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
+### Local development
 
 ```sh
-# Step 1: Clone the repository using the project's Git URL.
 git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
 cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
+npm install
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+Open http://localhost:8080 in your browser.
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+## Available scripts
 
-**Use GitHub Codespaces**
+- `npm run dev` - Start the Vite dev server
+- `npm run build` - Production build
+- `npm run preview` - Preview the production build
+- `npm run lint` - Run ESLint
+- `npm run test` - Run Vitest once
+- `npm run test:watch` - Run Vitest in watch mode
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+## Project structure
 
-## What technologies are used for this project?
+```
+src/
+  components/        UI and feature components
+  lib/               Color correction utilities
+  pages/             Route-based pages
+  types/             Shared TypeScript types
+```
 
-This project is built with:
+## Deployment
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+This is a static single-page app. Build the project and host the `dist/`
+folder with any static host.
 
-## How can I deploy this project?
+```sh
+npm run build
+```
 
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
+## Contributing
 
-## Can I connect a custom domain to my Lovable project?
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and
+submission guidelines. All contributors are expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
-Yes, you can!
+## Security
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+If you discover a vulnerability, please follow the guidance in
+[SECURITY.md](SECURITY.md).
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+## License
+
+Licensed under the [MIT License](LICENSE).
