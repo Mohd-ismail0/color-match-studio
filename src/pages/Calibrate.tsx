@@ -245,7 +245,10 @@ export default function Calibrate() {
 
                 <div className="flex items-center gap-2 p-3 rounded-lg bg-muted/50 text-sm text-muted-foreground">
                   <Crosshair className="w-4 h-4 flex-shrink-0" />
-                  <span>Click on the image to add calibration points. Click on a point to edit its target color.</span>
+                  <span>
+                    Click to add points, drag them to resample colors, and click a point to edit its label,
+                    target color, or delete it.
+                  </span>
                 </div>
               </div>
             )}
