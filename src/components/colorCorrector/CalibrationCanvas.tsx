@@ -94,6 +94,27 @@ export function CalibrationCanvas({
     [points, onPointsChange]
   );
 
+  const handlePointMove = useCallback(
+    (id: string, x: number, y: number) => {
+      if (!canvasRef.current || !isLoaded) return;
+      const canvas = canvasRef.current;
+      const sampledColor = sampleColorFromCanvas(canvas, x * canvas.width, y * canvas.height, 7);
+      onPointsChange(
+        points.map((p) =>
+          p.id === id
+            ? {
+                ...p,
+                x,
+                y,
+                sampledColor,
+              }
+            : p
+        )
+      );
+    },
+    [points, onPointsChange, isLoaded]
+  );
+
   const handlePointDelete = useCallback(
     (id: string) => {
       onPointsChange(points.filter((p) => p.id !== id));
@@ -128,6 +149,7 @@ export function CalibrationCanvas({
               point={point}
               onUpdate={handlePointUpdate}
               onDelete={handlePointDelete}
+              onMove={handlePointMove}
               containerRef={containerRef}
             />
           ))}
