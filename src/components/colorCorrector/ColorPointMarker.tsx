@@ -1,10 +1,10 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { ColorPoint, RGB } from '@/types/colorCorrector';
+import { ColorPoint } from '@/types/colorCorrector';
 import { rgbToHex, hexToRgb } from '@/lib/colorCorrection';
 import { cn } from '@/lib/utils';
 
@@ -34,12 +34,18 @@ export function ColorPointMarker({
   });
   const suppressClickRef = useRef(false);
 
+  useEffect(() => {
+    setTargetHex(rgbToHex(point.targetColor));
+  }, [point.targetColor]);
+
   const handleTargetColorChange = (hex: string) => {
     setTargetHex(hex);
-    if (/^#[0-9A-Fa-f]{6}$/.test(hex)) {
+    if (/^#?[0-9A-Fa-f]{6}$/.test(hex)) {
+      const normalized = hex.startsWith('#') ? hex : `#${hex}`;
+      setTargetHex(normalized);
       onUpdate({
         ...point,
-        targetColor: hexToRgb(hex),
+        targetColor: hexToRgb(normalized),
       });
     }
   };
@@ -64,6 +70,7 @@ export function ColorPointMarker({
 
   const handlePointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
     if (event.button !== 0) return;
+    event.stopPropagation();
     const position = getRelativePosition(event.clientX, event.clientY);
     if (!position) return;
 
@@ -113,10 +120,12 @@ export function ColorPointMarker({
   };
 
   const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    // Never let marker interactions create a new calibration point
+    event.stopPropagation();
     if (suppressClickRef.current) {
       suppressClickRef.current = false;
       event.preventDefault();
-      event.stopPropagation();
+      setIsOpen(false);
     }
   };
 
@@ -124,6 +133,8 @@ export function ColorPointMarker({
     <Popover open={isOpen} onOpenChange={setIsOpen}>
       <PopoverTrigger asChild>
         <button
+          type="button"
+          data-color-point-marker
           className={cn(
             "absolute w-6 h-6 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-background shadow-lg cursor-grab transition-transform hover:scale-125 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 active:cursor-grabbing",
             isOpen && "scale-125 ring-2 ring-ring ring-offset-2",

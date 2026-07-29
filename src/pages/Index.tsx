@@ -1,23 +1,46 @@
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Header } from '@/components/colorCorrector/Header';
 import { PresetCard } from '@/components/colorCorrector/PresetCard';
-import { getRecentPresets, getAllPresets } from '@/lib/presetStorage';
+import { getRecentPresets, getAllPresets, deletePreset } from '@/lib/presetStorage';
 import { Settings2, Upload, BookMarked, ArrowRight, Sparkles, Shield, Zap } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { CalibrationPreset } from '@/types/colorCorrector';
+import { toast } from 'sonner';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 const Index = () => {
   const navigate = useNavigate();
   const [recentPresets, setRecentPresets] = useState<CalibrationPreset[]>([]);
   const [allPresets, setAllPresets] = useState<CalibrationPreset[]>([]);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  useEffect(() => {
+  const refreshPresets = useCallback(() => {
     setRecentPresets(getRecentPresets());
     setAllPresets(getAllPresets());
   }, []);
+
+  useEffect(() => {
+    refreshPresets();
+  }, [refreshPresets]);
+
+  const confirmDelete = () => {
+    if (!deleteId) return;
+    deletePreset(deleteId);
+    refreshPresets();
+    toast.success('Preset deleted');
+    setDeleteId(null);
+  };
 
   const features = [
     {
@@ -40,9 +63,8 @@ const Index = () => {
   return (
     <div className="min-h-screen bg-background">
       <Header />
-      
+
       <main className="container py-8 space-y-12">
-        {/* Hero Section */}
         <section className="text-center space-y-6 py-8">
           <h1 className="text-4xl sm:text-5xl font-bold tracking-tight">
             Perfect Product Colors,
@@ -50,9 +72,10 @@ const Index = () => {
             <span className="text-primary">Every Time</span>
           </h1>
           <p className="text-xl text-muted-foreground max-w-2xl mx-auto">
-            Calibrate your photos using color cards and batch-correct your entire product catalog in minutes.
+            Calibrate your photos using color cards and batch-correct your entire product catalog in
+            minutes.
           </p>
-          
+
           <div className="flex flex-wrap justify-center gap-4 pt-4">
             <Button size="lg" asChild>
               <Link to="/calibrate">
@@ -70,9 +93,11 @@ const Index = () => {
           </div>
         </section>
 
-        {/* Quick Start Cards */}
         <section className="grid md:grid-cols-3 gap-6">
-          <Card className="group hover:shadow-lg transition-shadow cursor-pointer" onClick={() => navigate('/calibrate')}>
+          <Card
+            className="group hover:shadow-lg transition-shadow cursor-pointer"
+            onClick={() => navigate('/calibrate')}
+          >
             <CardHeader>
               <div className="p-3 rounded-xl bg-primary/10 w-fit mb-2 group-hover:bg-primary/20 transition-colors">
                 <Settings2 className="w-6 h-6 text-primary" />
@@ -84,7 +109,10 @@ const Index = () => {
             </CardHeader>
           </Card>
 
-          <Card className="group hover:shadow-lg transition-shadow cursor-pointer" onClick={() => navigate('/presets')}>
+          <Card
+            className="group hover:shadow-lg transition-shadow cursor-pointer"
+            onClick={() => navigate('/presets')}
+          >
             <CardHeader>
               <div className="p-3 rounded-xl bg-accent/10 w-fit mb-2 group-hover:bg-accent/20 transition-colors">
                 <BookMarked className="w-6 h-6 text-accent" />
@@ -96,7 +124,10 @@ const Index = () => {
             </CardHeader>
           </Card>
 
-          <Card className="group hover:shadow-lg transition-shadow cursor-pointer" onClick={() => navigate('/batch')}>
+          <Card
+            className="group hover:shadow-lg transition-shadow cursor-pointer"
+            onClick={() => navigate('/batch')}
+          >
             <CardHeader>
               <div className="p-3 rounded-xl bg-success/10 w-fit mb-2 group-hover:bg-success/20 transition-colors">
                 <Upload className="w-6 h-6 text-success" />
@@ -109,7 +140,6 @@ const Index = () => {
           </Card>
         </section>
 
-        {/* Features */}
         <section className="grid md:grid-cols-3 gap-8 py-8">
           {features.map((feature) => (
             <div key={feature.title} className="text-center space-y-3">
@@ -122,7 +152,6 @@ const Index = () => {
           ))}
         </section>
 
-        {/* Recent Presets */}
         {recentPresets.length > 0 && (
           <section className="space-y-4">
             <div className="flex items-center justify-between">
@@ -134,7 +163,7 @@ const Index = () => {
                 </Link>
               </Button>
             </div>
-            
+
             <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {recentPresets.slice(0, 3).map((preset) => (
                 <PresetCard
@@ -142,13 +171,33 @@ const Index = () => {
                   preset={preset}
                   onApply={() => navigate('/batch', { state: { preset } })}
                   onEdit={() => navigate('/calibrate', { state: { preset } })}
-                  onDelete={() => {}}
+                  onDelete={setDeleteId}
                 />
               ))}
             </div>
           </section>
         )}
       </main>
+
+      <AlertDialog open={!!deleteId} onOpenChange={(open) => !open && setDeleteId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Preset?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This action cannot be undone. The preset will be permanently removed from your library.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmDelete}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 };

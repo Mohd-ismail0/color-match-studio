@@ -7,6 +7,7 @@ interface DropZoneProps {
   accept?: string;
   multiple?: boolean;
   maxFiles?: number;
+  disabled?: boolean;
   className?: string;
   children?: React.ReactNode;
 }
@@ -16,6 +17,7 @@ export function DropZone({
   accept = 'image/*',
   multiple = false,
   maxFiles = 100,
+  disabled = false,
   className,
   children,
 }: DropZoneProps) {
@@ -24,8 +26,9 @@ export function DropZone({
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    if (disabled) return;
     setIsDragging(true);
-  }, []);
+  }, [disabled]);
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -38,6 +41,7 @@ export function DropZone({
       e.preventDefault();
       e.stopPropagation();
       setIsDragging(false);
+      if (disabled || maxFiles <= 0) return;
 
       const files = Array.from(e.dataTransfer.files).filter((file) =>
         file.type.startsWith('image/')
@@ -47,27 +51,34 @@ export function DropZone({
         onFilesSelected(files.slice(0, maxFiles));
       }
     },
-    [onFilesSelected, maxFiles]
+    [onFilesSelected, maxFiles, disabled]
   );
 
   const handleFileInput = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (disabled || maxFiles <= 0) {
+        e.target.value = '';
+        return;
+      }
       const files = e.target.files ? Array.from(e.target.files) : [];
       if (files.length > 0) {
         onFilesSelected(files.slice(0, maxFiles));
       }
       e.target.value = '';
     },
-    [onFilesSelected, maxFiles]
+    [onFilesSelected, maxFiles, disabled]
   );
 
   return (
     <label
       className={cn(
-        'relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed cursor-pointer transition-all duration-200',
-        isDragging
+        'relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed transition-all duration-200',
+        disabled
+          ? 'cursor-not-allowed opacity-60 border-border bg-muted/30'
+          : 'cursor-pointer',
+        !disabled && isDragging
           ? 'border-primary bg-primary/5 scale-[1.02]'
-          : 'border-border bg-card hover:border-primary/50 hover:bg-muted/50',
+          : !disabled && 'border-border bg-card hover:border-primary/50 hover:bg-muted/50',
         className
       )}
       onDragOver={handleDragOver}
@@ -80,15 +91,16 @@ export function DropZone({
         multiple={multiple}
         onChange={handleFileInput}
         className="sr-only"
+        disabled={disabled || maxFiles <= 0}
       />
       
       {children || (
         <div className="flex flex-col items-center gap-4 p-8 text-center">
           <div className={cn(
             "p-4 rounded-full transition-colors",
-            isDragging ? "bg-primary/10" : "bg-muted"
+            isDragging && !disabled ? "bg-primary/10" : "bg-muted"
           )}>
-            {isDragging ? (
+            {isDragging && !disabled ? (
               <Upload className="w-8 h-8 text-primary animate-bounce" />
             ) : (
               <ImageIcon className="w-8 h-8 text-muted-foreground" />
@@ -96,10 +108,16 @@ export function DropZone({
           </div>
           <div>
             <p className="text-lg font-medium text-foreground">
-              {isDragging ? 'Drop your images here' : 'Drag & drop images'}
+              {disabled
+                ? 'Image limit reached'
+                : isDragging
+                  ? 'Drop your images here'
+                  : 'Drag & drop images'}
             </p>
             <p className="text-sm text-muted-foreground mt-1">
-              or click to browse • {multiple ? `Up to ${maxFiles} images` : 'Single image'}
+              {disabled
+                ? 'Remove images to add more'
+                : `or click to browse • ${multiple ? `Up to ${maxFiles} images` : 'Single image'}`}
             </p>
           </div>
         </div>
