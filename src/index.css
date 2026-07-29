@@ -41,7 +41,7 @@ All colors MUST be HSL.
     --success: 142 70% 45%;
     --success-foreground: 0 0% 100%;
     
-    --warning: 38 92% 50%;
+    --warning: 32 90% 38%;
     --warning-foreground: 0 0% 100%;
 
     --sidebar-background: 0 0% 98%;
@@ -86,8 +86,8 @@ All colors MUST be HSL.
     --success: 142 70% 45%;
     --success-foreground: 0 0% 100%;
     
-    --warning: 38 92% 50%;
-    --warning-foreground: 0 0% 100%;
+    --warning: 38 92% 58%;
+    --warning-foreground: 220 20% 10%;
 
     --sidebar-background: 220 20% 10%;
     --sidebar-foreground: 220 10% 70%;
@@ -105,8 +105,13 @@ All colors MUST be HSL.
     @apply border-border;
   }
 
+  html {
+    scroll-padding-top: 3.5rem;
+  }
+
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
+    overflow-x: hidden;
   }
 }
 

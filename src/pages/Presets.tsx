@@ -95,11 +95,11 @@ export default function Presets() {
     <div className="min-h-screen bg-background">
       <Header />
 
-      <main className="container py-8 space-y-6">
+      <main id="main-content" className="container py-6 sm:py-8 space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h1 className="text-3xl font-bold">Preset Library</h1>
-            <p className="text-muted-foreground mt-1">
+          <div className="min-w-0">
+            <h1 className="text-2xl sm:text-3xl font-bold">Preset Library</h1>
+            <p className="text-muted-foreground mt-1 text-sm sm:text-base">
               Manage your saved color calibration presets
             </p>
           </div>
@@ -116,17 +116,17 @@ export default function Presets() {
                 e.target.value = '';
               }}
             />
-            <Button variant="outline" onClick={() => fileInputRef.current?.click()}>
+            <Button variant="outline" className="min-h-10" onClick={() => fileInputRef.current?.click()}>
               <Upload className="w-4 h-4 mr-2" />
               Import
             </Button>
             {presets.length > 0 && (
-              <Button variant="outline" onClick={handleExport}>
+              <Button variant="outline" className="min-h-10" onClick={handleExport}>
                 <Download className="w-4 h-4 mr-2" />
                 Export
               </Button>
             )}
-            <Button asChild>
+            <Button className="min-h-10" asChild>
               <Link to="/calibrate">
                 <Settings2 className="w-4 h-4 mr-2" />
                 New Preset
@@ -136,13 +136,14 @@ export default function Presets() {
         </div>
 
         {presets.length > 0 && (
-          <div className="relative max-w-md">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <div className="relative max-w-md w-full">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
             <Input
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search presets..."
-              className="pl-10"
+              className="pl-10 min-h-10"
+              aria-label="Search presets"
             />
           </div>
         )}

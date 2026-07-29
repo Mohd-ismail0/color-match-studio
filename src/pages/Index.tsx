@@ -64,27 +64,27 @@ const Index = () => {
     <div className="min-h-screen bg-background">
       <Header />
 
-      <main className="container py-8 space-y-12">
-        <section className="text-center space-y-6 py-8">
-          <h1 className="text-4xl sm:text-5xl font-bold tracking-tight">
+      <main id="main-content" className="container py-6 sm:py-8 space-y-10 sm:space-y-12">
+        <section className="text-center space-y-4 sm:space-y-6 py-4 sm:py-8">
+          <h1 className="text-3xl sm:text-4xl md:text-5xl font-bold tracking-tight">
             Perfect Product Colors,
             <br />
             <span className="text-primary">Every Time</span>
           </h1>
-          <p className="text-xl text-muted-foreground max-w-2xl mx-auto">
+          <p className="text-base sm:text-xl text-muted-foreground max-w-2xl mx-auto px-1">
             Calibrate your photos using color cards and batch-correct your entire product catalog in
             minutes.
           </p>
 
-          <div className="flex flex-wrap justify-center gap-4 pt-4">
-            <Button size="lg" asChild>
+          <div className="flex flex-col sm:flex-row flex-wrap justify-center gap-3 sm:gap-4 pt-2 sm:pt-4">
+            <Button size="lg" className="w-full sm:w-auto min-h-11" asChild>
               <Link to="/calibrate">
                 <Settings2 className="w-5 h-5 mr-2" />
                 Start Calibrating
                 <ArrowRight className="w-5 h-5 ml-2" />
               </Link>
             </Button>
-            <Button size="lg" variant="outline" asChild>
+            <Button size="lg" variant="outline" className="w-full sm:w-auto min-h-11" asChild>
               <Link to="/batch">
                 <Upload className="w-5 h-5 mr-2" />
                 Batch Process
@@ -93,54 +93,60 @@ const Index = () => {
           </div>
         </section>
 
-        <section className="grid md:grid-cols-3 gap-6">
-          <Card
-            className="group hover:shadow-lg transition-shadow cursor-pointer"
-            onClick={() => navigate('/calibrate')}
+        <section className="grid sm:grid-cols-2 md:grid-cols-3 gap-4 sm:gap-6">
+          <Link
+            to="/calibrate"
+            className="block rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           >
-            <CardHeader>
-              <div className="p-3 rounded-xl bg-primary/10 w-fit mb-2 group-hover:bg-primary/20 transition-colors">
-                <Settings2 className="w-6 h-6 text-primary" />
-              </div>
-              <CardTitle>1. Calibrate</CardTitle>
-              <CardDescription>
-                Upload a reference photo with your color card and set calibration points.
-              </CardDescription>
-            </CardHeader>
-          </Card>
+            <Card className="group h-full hover:shadow-lg transition-shadow">
+              <CardHeader>
+                <div className="p-3 rounded-xl bg-primary/10 w-fit mb-2 group-hover:bg-primary/20 transition-colors">
+                  <Settings2 className="w-6 h-6 text-primary" />
+                </div>
+                <CardTitle>1. Calibrate</CardTitle>
+                <CardDescription>
+                  Upload a reference photo with your color card and set calibration points.
+                </CardDescription>
+              </CardHeader>
+            </Card>
+          </Link>
 
-          <Card
-            className="group hover:shadow-lg transition-shadow cursor-pointer"
-            onClick={() => navigate('/presets')}
+          <Link
+            to="/presets"
+            className="block rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           >
-            <CardHeader>
-              <div className="p-3 rounded-xl bg-accent/10 w-fit mb-2 group-hover:bg-accent/20 transition-colors">
-                <BookMarked className="w-6 h-6 text-accent" />
-              </div>
-              <CardTitle>2. Save Preset</CardTitle>
-              <CardDescription>
-                Save your calibration as a reusable preset for your shooting environment.
-              </CardDescription>
-            </CardHeader>
-          </Card>
+            <Card className="group h-full hover:shadow-lg transition-shadow">
+              <CardHeader>
+                <div className="p-3 rounded-xl bg-accent/10 w-fit mb-2 group-hover:bg-accent/20 transition-colors">
+                  <BookMarked className="w-6 h-6 text-accent" />
+                </div>
+                <CardTitle>2. Save Preset</CardTitle>
+                <CardDescription>
+                  Save your calibration as a reusable preset for your shooting environment.
+                </CardDescription>
+              </CardHeader>
+            </Card>
+          </Link>
 
-          <Card
-            className="group hover:shadow-lg transition-shadow cursor-pointer"
-            onClick={() => navigate('/batch')}
+          <Link
+            to="/batch"
+            className="block rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:col-span-2 md:col-span-1"
           >
-            <CardHeader>
-              <div className="p-3 rounded-xl bg-success/10 w-fit mb-2 group-hover:bg-success/20 transition-colors">
-                <Upload className="w-6 h-6 text-success" />
-              </div>
-              <CardTitle>3. Batch Process</CardTitle>
-              <CardDescription>
-                Apply your preset to multiple images and download them all at once.
-              </CardDescription>
-            </CardHeader>
-          </Card>
+            <Card className="group h-full hover:shadow-lg transition-shadow">
+              <CardHeader>
+                <div className="p-3 rounded-xl bg-success/10 w-fit mb-2 group-hover:bg-success/20 transition-colors">
+                  <Upload className="w-6 h-6 text-success" />
+                </div>
+                <CardTitle>3. Batch Process</CardTitle>
+                <CardDescription>
+                  Apply your preset to multiple images and download them all at once.
+                </CardDescription>
+              </CardHeader>
+            </Card>
+          </Link>
         </section>
 
-        <section className="grid md:grid-cols-3 gap-8 py-8">
+        <section className="grid sm:grid-cols-2 md:grid-cols-3 gap-6 sm:gap-8 py-4 sm:py-8">
           {features.map((feature) => (
             <div key={feature.title} className="text-center space-y-3">
               <div className="mx-auto p-4 rounded-full bg-muted w-fit">
@@ -154,9 +160,9 @@ const Index = () => {
 
         {recentPresets.length > 0 && (
           <section className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-2xl font-semibold">Recent Presets</h2>
-              <Button variant="ghost" asChild>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <h2 className="text-xl sm:text-2xl font-semibold">Recent Presets</h2>
+              <Button variant="ghost" className="self-start sm:self-auto" asChild>
                 <Link to="/presets">
                   View All ({allPresets.length})
                   <ArrowRight className="w-4 h-4 ml-2" />
@@ -180,7 +186,7 @@ const Index = () => {
       </main>
 
       <AlertDialog open={!!deleteId} onOpenChange={(open) => !open && setDeleteId(null)}>
-        <AlertDialogContent>
+        <AlertDialogContent className="max-w-[calc(100vw-2rem)] sm:max-w-lg">
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Preset?</AlertDialogTitle>
             <AlertDialogDescription>

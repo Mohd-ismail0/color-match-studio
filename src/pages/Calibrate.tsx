@@ -261,27 +261,27 @@ export default function Calibrate() {
     <div className="min-h-screen bg-background">
       <Header />
 
-      <main className="container py-8 space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold">Calibration Studio</h1>
-            <p className="text-muted-foreground mt-1">
+      <main id="main-content" className="container py-6 sm:py-8 space-y-6">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="text-2xl sm:text-3xl font-bold">Calibration Studio</h1>
+            <p className="text-muted-foreground mt-1 text-sm sm:text-base">
               Upload a reference image and click to place calibration points
             </p>
           </div>
         </div>
 
         <div className="grid lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 space-y-4">
+          <div className="lg:col-span-2 space-y-4 min-w-0">
             {!imageUrl ? (
-              <DropZone onFilesSelected={handleFileSelected} className="min-h-[400px]">
-                <div className="flex flex-col items-center gap-4 p-12 text-center">
-                  <div className="p-6 rounded-full bg-muted">
-                    <Upload className="w-10 h-10 text-muted-foreground" />
+              <DropZone onFilesSelected={handleFileSelected} className="min-h-[280px] sm:min-h-[400px]">
+                <div className="flex flex-col items-center gap-4 p-6 sm:p-12 text-center">
+                  <div className="p-4 sm:p-6 rounded-full bg-muted">
+                    <Upload className="w-8 h-8 sm:w-10 sm:h-10 text-muted-foreground" />
                   </div>
                   <div>
-                    <p className="text-xl font-medium">Upload Reference Image</p>
-                    <p className="text-muted-foreground mt-1">
+                    <p className="text-lg sm:text-xl font-medium">Upload Reference Image</p>
+                    <p className="text-muted-foreground mt-1 text-sm sm:text-base">
                       {editingPreset
                         ? `Editing "${editingPreset.name}" — upload a reference image to adjust points`
                         : 'Choose a photo with your color card visible'}
@@ -291,11 +291,12 @@ export default function Calibrate() {
               </DropZone>
             ) : (
               <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+                  <div className="flex flex-wrap items-center gap-2">
                     <Button
                       variant="outline"
                       size="sm"
+                      className="min-h-9"
                       onClick={() => setShowPreview(!showPreview)}
                       disabled={!matrix}
                     >
@@ -312,13 +313,13 @@ export default function Calibrate() {
                       )}
                     </Button>
 
-                    <Button variant="ghost" size="sm" onClick={handleClearAll}>
+                    <Button variant="ghost" size="sm" className="min-h-9" onClick={handleClearAll}>
                       <Trash2 className="w-4 h-4 mr-2" />
                       Clear Points
                     </Button>
                   </div>
 
-                  <Button variant="ghost" size="sm" onClick={handleChangeImage}>
+                  <Button variant="ghost" size="sm" className="min-h-9 self-start" onClick={handleChangeImage}>
                     Change Image
                   </Button>
                 </div>
@@ -363,7 +364,9 @@ export default function Calibrate() {
                   </TabsContent>
                 </Tabs>
                 {fitWarning && (
-                  <p className="text-xs text-warning mt-3">{fitWarning}</p>
+                  <p className="text-xs text-foreground mt-3 rounded-md bg-warning/15 border border-warning/40 p-2">
+                    {fitWarning}
+                  </p>
                 )}
               </CardContent>
             </Card>

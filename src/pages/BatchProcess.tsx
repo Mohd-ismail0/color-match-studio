@@ -59,22 +59,22 @@ export default function BatchProcess() {
     <div className="min-h-screen bg-background">
       <Header />
 
-      <main className="container py-8 space-y-6">
+      <main id="main-content" className="container py-6 sm:py-8 space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h1 className="text-3xl font-bold">Batch Processor</h1>
-            <p className="text-muted-foreground mt-1">
+          <div className="min-w-0">
+            <h1 className="text-2xl sm:text-3xl font-bold">Batch Processor</h1>
+            <p className="text-muted-foreground mt-1 text-sm sm:text-base">
               Apply color correction to multiple images at once
             </p>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 w-full sm:w-auto">
             {hasAnyPreset ? (
               <Select
                 value={selectedPreset?.id || undefined}
                 onValueChange={handlePresetChange}
               >
-                <SelectTrigger className="w-[250px]">
+                <SelectTrigger className="w-full sm:w-[250px] min-h-10">
                   <SelectValue placeholder="Select a preset" />
                 </SelectTrigger>
                 <SelectContent>
@@ -83,10 +83,10 @@ export default function BatchProcess() {
                       transientPreset?.id === preset.id && !isPresetPersisted(preset.id);
                     return (
                       <SelectItem key={preset.id} value={preset.id}>
-                        <div className="flex items-center gap-2">
-                          <span>{preset.name}</span>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="truncate">{preset.name}</span>
                           {unsaved && (
-                            <span className="text-xs text-muted-foreground">(unsaved)</span>
+                            <span className="text-xs text-muted-foreground shrink-0">(unsaved)</span>
                           )}
                         </div>
                       </SelectItem>
@@ -95,7 +95,7 @@ export default function BatchProcess() {
                 </SelectContent>
               </Select>
             ) : (
-              <Button asChild>
+              <Button className="w-full sm:w-auto min-h-10" asChild>
                 <Link to="/calibrate">
                   <Settings2 className="w-4 h-4 mr-2" />
                   Create Preset
@@ -107,12 +107,12 @@ export default function BatchProcess() {
 
         {selectedPreset && (
           <Card className="bg-success/5 border-success/20">
-            <CardContent className="flex items-center gap-4 py-4">
-              <div className="p-2 rounded-full bg-success/10">
+            <CardContent className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4 py-4">
+              <div className="p-2 rounded-full bg-success/10 w-fit shrink-0">
                 <Check className="w-5 h-5 text-success" />
               </div>
-              <div className="flex-1">
-                <p className="font-medium">
+              <div className="flex-1 min-w-0">
+                <p className="font-medium truncate">
                   Using: {selectedPreset.name}
                   {selectedIsUnsaved ? ' (unsaved)' : ''}
                 </p>
@@ -122,7 +122,7 @@ export default function BatchProcess() {
                   {!selectedPreset.matrix && ' • Missing matrix'}
                 </p>
               </div>
-              <Button variant="outline" size="sm" asChild>
+              <Button variant="outline" size="sm" className="w-full sm:w-auto min-h-9" asChild>
                 <Link to="/calibrate" state={{ preset: selectedPreset }}>
                   Edit
                 </Link>
@@ -132,12 +132,12 @@ export default function BatchProcess() {
         )}
 
         {!selectedPreset && hasAnyPreset && (
-          <Card className="bg-warning/5 border-warning/20">
-            <CardContent className="flex items-center gap-4 py-4">
-              <div className="p-2 rounded-full bg-warning/10">
+          <Card className="bg-warning/10 border-warning/30">
+            <CardContent className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4 py-4">
+              <div className="p-2 rounded-full bg-warning/15 w-fit shrink-0">
                 <AlertCircle className="w-5 h-5 text-warning" />
               </div>
-              <div>
+              <div className="min-w-0">
                 <p className="font-medium">No preset selected</p>
                 <p className="text-sm text-muted-foreground">
                   Choose a preset from the dropdown to start processing images
