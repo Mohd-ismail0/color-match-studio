@@ -1,7 +1,16 @@
 import { RGB, ColorPoint, ColorMatrix } from '@/types/colorCorrector';
 
+const IDENTITY_MATRIX: ColorMatrix = {
+  matrix: [
+    [1, 0, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+  ],
+  offset: { r: 0, g: 0, b: 0 },
+};
+
 export function hexToRgb(hex: string): RGB {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex.trim());
   if (!result) {
     return { r: 0, g: 0, b: 0 };
   }
@@ -20,25 +29,35 @@ export function rgbToHex(rgb: RGB): string {
   return `#${toHex(rgb.r)}${toHex(rgb.g)}${toHex(rgb.b)}`;
 }
 
+export function clampChannel(value: number): number {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
 export function sampleColorFromCanvas(
   canvas: HTMLCanvasElement,
   x: number,
   y: number,
   sampleSize: number = 5
 ): RGB {
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) return { r: 0, g: 0, b: 0 };
 
   const halfSize = Math.floor(sampleSize / 2);
   const startX = Math.max(0, Math.floor(x) - halfSize);
   const startY = Math.max(0, Math.floor(y) - halfSize);
-  const endX = Math.min(canvas.width, startX + sampleSize);
-  const endY = Math.min(canvas.height, startY + sampleSize);
+  const width = Math.min(sampleSize, canvas.width - startX);
+  const height = Math.min(sampleSize, canvas.height - startY);
 
-  const imageData = ctx.getImageData(startX, startY, endX - startX, endY - startY);
+  if (width <= 0 || height <= 0) {
+    return { r: 0, g: 0, b: 0 };
+  }
+
+  const imageData = ctx.getImageData(startX, startY, width, height);
   const data = imageData.data;
 
-  let totalR = 0, totalG = 0, totalB = 0;
+  let totalR = 0;
+  let totalG = 0;
+  let totalB = 0;
   const pixelCount = data.length / 4;
 
   for (let i = 0; i < data.length; i += 4) {
@@ -54,97 +73,156 @@ export function sampleColorFromCanvas(
   };
 }
 
-// Calculate simple 3-point color correction matrix (white balance + exposure)
-export function calculateSimpleMatrix(points: ColorPoint[]): ColorMatrix {
-  // Find white, grey, and black points or use available points
-  const whitePoint = points.find(p => p.label.toLowerCase().includes('white'));
-  const greyPoint = points.find(p => p.label.toLowerCase().includes('grey') || p.label.toLowerCase().includes('gray'));
-  const blackPoint = points.find(p => p.label.toLowerCase().includes('black'));
+function findPoint(
+  points: ColorPoint[],
+  ...labels: string[]
+): ColorPoint | undefined {
+  return points.find((p) => {
+    const label = p.label.toLowerCase();
+    return labels.some((candidate) => label.includes(candidate));
+  });
+}
 
-  // Default identity matrix
-  let matrix: number[][] = [
-    [1, 0, 0],
-    [0, 1, 0],
-    [0, 0, 1],
-  ];
-  let offset: RGB = { r: 0, g: 0, b: 0 };
+function channelScale(target: number, sampled: number): number {
+  if (Math.abs(sampled) < 1e-6) {
+    return target === 0 ? 1 : 0;
+  }
+  return target / sampled;
+}
 
-  if (points.length === 0) {
-    return { matrix, offset };
+function channelStretch(
+  sampleLow: number,
+  sampleHigh: number,
+  targetLow: number,
+  targetHigh: number
+): { scale: number; offset: number } {
+  const sampleDelta = sampleHigh - sampleLow;
+  if (Math.abs(sampleDelta) < 1e-6) {
+    return {
+      scale: 1,
+      offset: targetLow - sampleLow,
+    };
   }
 
-  // Calculate scale factors from available points
+  const scale = (targetHigh - targetLow) / sampleDelta;
+  const offset = targetLow - sampleLow * scale;
+  return { scale, offset };
+}
+
+/**
+ * Diagonal affine correction using white / grey / black reference points.
+ * Model per channel: out = sample * scale + offset
+ */
+export function calculateSimpleMatrix(points: ColorPoint[]): ColorMatrix {
+  if (points.length === 0) {
+    return {
+      matrix: IDENTITY_MATRIX.matrix.map((row) => [...row]),
+      offset: { ...IDENTITY_MATRIX.offset },
+    };
+  }
+
+  const whitePoint = findPoint(points, 'white');
+  const greyPoint = findPoint(points, 'grey', 'gray');
+  const blackPoint = findPoint(points, 'black');
+
   const scales = { r: 1, g: 1, b: 1 };
   const offsets = { r: 0, g: 0, b: 0 };
 
-  if (whitePoint) {
-    // Scale to make sampled white match target white
-    scales.r = whitePoint.targetColor.r / Math.max(1, whitePoint.sampledColor.r);
-    scales.g = whitePoint.targetColor.g / Math.max(1, whitePoint.sampledColor.g);
-    scales.b = whitePoint.targetColor.b / Math.max(1, whitePoint.sampledColor.b);
+  if (whitePoint && blackPoint) {
+    // Full black→white linear stretch per channel
+    (['r', 'g', 'b'] as const).forEach((channel) => {
+      const { scale, offset } = channelStretch(
+        blackPoint.sampledColor[channel],
+        whitePoint.sampledColor[channel],
+        blackPoint.targetColor[channel],
+        whitePoint.targetColor[channel]
+      );
+      scales[channel] = scale;
+      offsets[channel] = offset;
+    });
+  } else if (whitePoint) {
+    // White balance + exposure from white point
+    scales.r = channelScale(whitePoint.targetColor.r, whitePoint.sampledColor.r);
+    scales.g = channelScale(whitePoint.targetColor.g, whitePoint.sampledColor.g);
+    scales.b = channelScale(whitePoint.targetColor.b, whitePoint.sampledColor.b);
+
+    if (greyPoint) {
+      // Soft midtone neutrality nudge using grey, preserving white lock
+      const greyScales = {
+        r: channelScale(greyPoint.targetColor.r, greyPoint.sampledColor.r),
+        g: channelScale(greyPoint.targetColor.g, greyPoint.sampledColor.g),
+        b: channelScale(greyPoint.targetColor.b, greyPoint.sampledColor.b),
+      };
+      const blend = 0.35;
+      scales.r = scales.r * (1 - blend) + greyScales.r * blend;
+      scales.g = scales.g * (1 - blend) + greyScales.g * blend;
+      scales.b = scales.b * (1 - blend) + greyScales.b * blend;
+    }
+  } else if (greyPoint) {
+    // Classic grey-card white balance: map sampled grey → target grey
+    scales.r = channelScale(greyPoint.targetColor.r, greyPoint.sampledColor.r);
+    scales.g = channelScale(greyPoint.targetColor.g, greyPoint.sampledColor.g);
+    scales.b = channelScale(greyPoint.targetColor.b, greyPoint.sampledColor.b);
+  } else if (blackPoint) {
+    offsets.r = blackPoint.targetColor.r - blackPoint.sampledColor.r;
+    offsets.g = blackPoint.targetColor.g - blackPoint.sampledColor.g;
+    offsets.b = blackPoint.targetColor.b - blackPoint.sampledColor.b;
+  } else {
+    // Unlabeled custom points: average per-channel scales toward first point
+    const primary = points[0];
+    scales.r = channelScale(primary.targetColor.r, primary.sampledColor.r);
+    scales.g = channelScale(primary.targetColor.g, primary.sampledColor.g);
+    scales.b = channelScale(primary.targetColor.b, primary.sampledColor.b);
   }
 
-  if (blackPoint) {
-    // Offset to make sampled black match target black
-    offsets.r = blackPoint.targetColor.r - blackPoint.sampledColor.r * scales.r;
-    offsets.g = blackPoint.targetColor.g - blackPoint.sampledColor.g * scales.g;
-    offsets.b = blackPoint.targetColor.b - blackPoint.sampledColor.b * scales.b;
-  }
-
-  // If we only have grey point, use it for white balance
-  if (!whitePoint && !blackPoint && greyPoint) {
-    const avgSampled = (greyPoint.sampledColor.r + greyPoint.sampledColor.g + greyPoint.sampledColor.b) / 3;
-    const avgTarget = (greyPoint.targetColor.r + greyPoint.targetColor.g + greyPoint.targetColor.b) / 3;
-    const baseScale = avgTarget / Math.max(1, avgSampled);
-    
-    scales.r = (greyPoint.targetColor.r / Math.max(1, greyPoint.sampledColor.r)) * baseScale / Math.max(1, baseScale);
-    scales.g = (greyPoint.targetColor.g / Math.max(1, greyPoint.sampledColor.g)) * baseScale / Math.max(1, baseScale);
-    scales.b = (greyPoint.targetColor.b / Math.max(1, greyPoint.sampledColor.b)) * baseScale / Math.max(1, baseScale);
-  }
-
-  matrix = [
-    [scales.r, 0, 0],
-    [0, scales.g, 0],
-    [0, 0, scales.b],
-  ];
-
-  offset = offsets;
-
-  return { matrix, offset };
+  return {
+    matrix: [
+      [scales.r, 0, 0],
+      [0, scales.g, 0],
+      [0, 0, scales.b],
+    ],
+    offset: offsets,
+  };
 }
 
-// Calculate advanced multi-point color correction using least squares
+/**
+ * Multi-point least-squares color correction.
+ * - 4+ points: full 3×3 matrix + offset (affine)
+ * - 3 points: 3×3 matrix only (homogeneous)
+ * - <3 points: fall back to simple diagonal correction
+ */
 export function calculateAdvancedMatrix(points: ColorPoint[]): ColorMatrix {
   if (points.length < 3) {
     return calculateSimpleMatrix(points);
   }
 
-  // Use least squares to find the best fit 3x3 matrix
-  // For each channel, solve: target = matrix * sampled + offset
-  
-  const n = points.length;
-  
-  // Build matrices for least squares solution
-  // We solve for each output channel separately
-  const A: number[][] = points.map(p => [p.sampledColor.r, p.sampledColor.g, p.sampledColor.b, 1]);
-  
+  const useOffset = points.length >= 4;
+
+  const A: number[][] = points.map((p) =>
+    useOffset
+      ? [p.sampledColor.r, p.sampledColor.g, p.sampledColor.b, 1]
+      : [p.sampledColor.r, p.sampledColor.g, p.sampledColor.b]
+  );
+
   const solveForChannel = (targetValues: number[]): number[] => {
-    // Solve A * x = b using normal equations: (A^T * A) * x = A^T * b
     const AT = transpose(A);
     const ATA = multiply(AT, A);
     const ATb = multiplyVector(AT, targetValues);
-    
-    // Solve using simple Gaussian elimination
     return solveLinear(ATA, ATb);
   };
 
-  const targetR = points.map(p => p.targetColor.r);
-  const targetG = points.map(p => p.targetColor.g);
-  const targetB = points.map(p => p.targetColor.b);
+  const coeffR = solveForChannel(points.map((p) => p.targetColor.r));
+  const coeffG = solveForChannel(points.map((p) => p.targetColor.g));
+  const coeffB = solveForChannel(points.map((p) => p.targetColor.b));
 
-  const coeffR = solveForChannel(targetR);
-  const coeffG = solveForChannel(targetG);
-  const coeffB = solveForChannel(targetB);
+  // Guard against singular / degenerate solutions
+  if (
+    !isFiniteVector(coeffR) ||
+    !isFiniteVector(coeffG) ||
+    !isFiniteVector(coeffB)
+  ) {
+    return calculateSimpleMatrix(points);
+  }
 
   return {
     matrix: [
@@ -152,16 +230,32 @@ export function calculateAdvancedMatrix(points: ColorPoint[]): ColorMatrix {
       [coeffG[0], coeffG[1], coeffG[2]],
       [coeffB[0], coeffB[1], coeffB[2]],
     ],
-    offset: {
-      r: coeffR[3] || 0,
-      g: coeffG[3] || 0,
-      b: coeffB[3] || 0,
-    },
+    offset: useOffset
+      ? {
+          r: coeffR[3] ?? 0,
+          g: coeffG[3] ?? 0,
+          b: coeffB[3] ?? 0,
+        }
+      : { r: 0, g: 0, b: 0 },
   };
 }
 
+export function calculateMatrix(
+  points: ColorPoint[],
+  mode: 'simple' | 'advanced'
+): ColorMatrix {
+  return mode === 'advanced'
+    ? calculateAdvancedMatrix(points)
+    : calculateSimpleMatrix(points);
+}
+
+function isFiniteVector(values: number[]): boolean {
+  return values.length > 0 && values.every((v) => Number.isFinite(v));
+}
+
 function transpose(m: number[][]): number[][] {
-  return m[0].map((_, i) => m.map(row => row[i]));
+  if (m.length === 0) return [];
+  return m[0].map((_, i) => m.map((row) => row[i]));
 }
 
 function multiply(a: number[][], b: number[][]): number[][] {
@@ -180,16 +274,14 @@ function multiply(a: number[][], b: number[][]): number[][] {
 }
 
 function multiplyVector(m: number[][], v: number[]): number[] {
-  return m.map(row => row.reduce((sum, val, i) => sum + val * v[i], 0));
+  return m.map((row) => row.reduce((sum, val, i) => sum + val * (v[i] ?? 0), 0));
 }
 
 function solveLinear(A: number[][], b: number[]): number[] {
   const n = A.length;
   const aug: number[][] = A.map((row, i) => [...row, b[i]]);
 
-  // Forward elimination
   for (let col = 0; col < n; col++) {
-    // Find pivot
     let maxRow = col;
     for (let row = col + 1; row < n; row++) {
       if (Math.abs(aug[row][col]) > Math.abs(aug[maxRow][col])) {
@@ -200,7 +292,6 @@ function solveLinear(A: number[][], b: number[]): number[] {
 
     if (Math.abs(aug[col][col]) < 1e-10) continue;
 
-    // Eliminate column
     for (let row = col + 1; row < n; row++) {
       const factor = aug[row][col] / aug[col][col];
       for (let j = col; j <= n; j++) {
@@ -209,30 +300,31 @@ function solveLinear(A: number[][], b: number[]): number[] {
     }
   }
 
-  // Back substitution
   const x = new Array(n).fill(0);
   for (let i = n - 1; i >= 0; i--) {
+    if (Math.abs(aug[i][i]) < 1e-10) {
+      x[i] = 0;
+      continue;
+    }
     let sum = aug[i][n];
     for (let j = i + 1; j < n; j++) {
       sum -= aug[i][j] * x[j];
     }
-    x[i] = Math.abs(aug[i][i]) > 1e-10 ? sum / aug[i][i] : 0;
+    x[i] = sum / aug[i][i];
   }
 
   return x;
 }
 
-// Apply color correction matrix to RGB value
 export function applyColorMatrix(color: RGB, matrix: ColorMatrix): RGB {
   const { matrix: m, offset } = matrix;
   return {
-    r: Math.max(0, Math.min(255, m[0][0] * color.r + m[0][1] * color.g + m[0][2] * color.b + offset.r)),
-    g: Math.max(0, Math.min(255, m[1][0] * color.r + m[1][1] * color.g + m[1][2] * color.b + offset.g)),
-    b: Math.max(0, Math.min(255, m[2][0] * color.r + m[2][1] * color.g + m[2][2] * color.b + offset.b)),
+    r: clampChannel(m[0][0] * color.r + m[0][1] * color.g + m[0][2] * color.b + offset.r),
+    g: clampChannel(m[1][0] * color.r + m[1][1] * color.g + m[1][2] * color.b + offset.g),
+    b: clampChannel(m[2][0] * color.r + m[2][1] * color.g + m[2][2] * color.b + offset.b),
   };
 }
 
-// Apply color correction to entire image
 export function applyColorCorrectionToImage(
   sourceCanvas: HTMLCanvasElement,
   matrix: ColorMatrix
@@ -248,7 +340,6 @@ export function applyColorCorrectionToImage(
 
   const imageData = sourceCtx.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
   const data = imageData.data;
-
   const { matrix: m, offset } = matrix;
 
   for (let i = 0; i < data.length; i += 4) {
@@ -256,17 +347,15 @@ export function applyColorCorrectionToImage(
     const g = data[i + 1];
     const b = data[i + 2];
 
-    data[i] = Math.max(0, Math.min(255, m[0][0] * r + m[0][1] * g + m[0][2] * b + offset.r));
-    data[i + 1] = Math.max(0, Math.min(255, m[1][0] * r + m[1][1] * g + m[1][2] * b + offset.g));
-    data[i + 2] = Math.max(0, Math.min(255, m[2][0] * r + m[2][1] * g + m[2][2] * b + offset.b));
-    // Alpha channel (data[i + 3]) remains unchanged
+    data[i] = clampChannel(m[0][0] * r + m[0][1] * g + m[0][2] * b + offset.r);
+    data[i + 1] = clampChannel(m[1][0] * r + m[1][1] * g + m[1][2] * b + offset.g);
+    data[i + 2] = clampChannel(m[2][0] * r + m[2][1] * g + m[2][2] * b + offset.b);
   }
 
   destCtx.putImageData(imageData, 0, 0);
   return destCanvas;
 }
 
-// Load image file to canvas
 export function loadImageToCanvas(file: File): Promise<HTMLCanvasElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -274,12 +363,15 @@ export function loadImageToCanvas(file: File): Promise<HTMLCanvasElement> {
 
     img.onload = () => {
       const canvas = document.createElement('canvas');
-      canvas.width = img.width;
-      canvas.height = img.height;
+      canvas.width = img.naturalWidth || img.width;
+      canvas.height = img.naturalHeight || img.height;
       const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(img, 0, 0);
+      if (!ctx) {
+        URL.revokeObjectURL(url);
+        reject(new Error('Failed to get canvas context'));
+        return;
       }
+      ctx.drawImage(img, 0, 0);
       URL.revokeObjectURL(url);
       resolve(canvas);
     };
@@ -293,7 +385,6 @@ export function loadImageToCanvas(file: File): Promise<HTMLCanvasElement> {
   });
 }
 
-// Convert canvas to blob
 export function canvasToBlob(
   canvas: HTMLCanvasElement,
   format: 'jpeg' | 'png',
@@ -309,7 +400,7 @@ export function canvasToBlob(
         }
       },
       format === 'jpeg' ? 'image/jpeg' : 'image/png',
-      format === 'jpeg' ? quality : undefined
+      format === 'jpeg' ? Math.max(0, Math.min(1, quality)) : undefined
     );
   });
 }
