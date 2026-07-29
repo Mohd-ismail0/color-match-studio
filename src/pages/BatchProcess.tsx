@@ -6,38 +6,43 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { CalibrationPreset } from '@/types/colorCorrector';
-import { getAllPresets } from '@/lib/presetStorage';
+import { getAllPresets, isPresetPersisted } from '@/lib/presetStorage';
 import { Settings2, Check, AlertCircle } from 'lucide-react';
 
 export default function BatchProcess() {
   const location = useLocation();
   const [presets, setPresets] = useState<CalibrationPreset[]>([]);
   const [selectedPreset, setSelectedPreset] = useState<CalibrationPreset | null>(null);
+  const [transientPreset, setTransientPreset] = useState<CalibrationPreset | null>(null);
 
   useEffect(() => {
     const stored = getAllPresets();
     setPresets(stored);
 
     const incoming = location.state?.preset as CalibrationPreset | undefined;
-    if (incoming?.matrix) {
+    const markedUnsaved = Boolean(location.state?.unsaved);
+
+    if (incoming?.matrix || (incoming && incoming.points.length > 0)) {
       setSelectedPreset(incoming);
-      // Keep unsaved/transient presets selectable even if not persisted yet
-      if (!stored.some((p) => p.id === incoming.id)) {
-        setPresets([incoming, ...stored]);
+      if (markedUnsaved || !isPresetPersisted(incoming.id)) {
+        setTransientPreset(incoming);
+      } else {
+        setTransientPreset(null);
       }
       return;
     }
 
+    setTransientPreset(null);
     if (stored.length === 1) {
       setSelectedPreset(stored[0]);
     }
   }, [location.state]);
 
   const selectablePresets = useMemo(() => {
-    if (!selectedPreset) return presets;
-    if (presets.some((p) => p.id === selectedPreset.id)) return presets;
-    return [selectedPreset, ...presets];
-  }, [presets, selectedPreset]);
+    if (!transientPreset) return presets;
+    if (presets.some((p) => p.id === transientPreset.id)) return presets;
+    return [transientPreset, ...presets];
+  }, [presets, transientPreset]);
 
   const handlePresetChange = (presetId: string) => {
     const preset = selectablePresets.find((p) => p.id === presetId);
@@ -45,6 +50,10 @@ export default function BatchProcess() {
   };
 
   const hasAnyPreset = selectablePresets.length > 0 || !!selectedPreset;
+  const selectedIsUnsaved =
+    !!selectedPreset &&
+    (!!transientPreset && transientPreset.id === selectedPreset.id) &&
+    !isPresetPersisted(selectedPreset.id);
 
   return (
     <div className="min-h-screen bg-background">
@@ -69,16 +78,20 @@ export default function BatchProcess() {
                   <SelectValue placeholder="Select a preset" />
                 </SelectTrigger>
                 <SelectContent>
-                  {selectablePresets.map((preset) => (
-                    <SelectItem key={preset.id} value={preset.id}>
-                      <div className="flex items-center gap-2">
-                        <span>{preset.name}</span>
-                        {!presets.some((p) => p.id === preset.id) && (
-                          <span className="text-xs text-muted-foreground">(unsaved)</span>
-                        )}
-                      </div>
-                    </SelectItem>
-                  ))}
+                  {selectablePresets.map((preset) => {
+                    const unsaved =
+                      transientPreset?.id === preset.id && !isPresetPersisted(preset.id);
+                    return (
+                      <SelectItem key={preset.id} value={preset.id}>
+                        <div className="flex items-center gap-2">
+                          <span>{preset.name}</span>
+                          {unsaved && (
+                            <span className="text-xs text-muted-foreground">(unsaved)</span>
+                          )}
+                        </div>
+                      </SelectItem>
+                    );
+                  })}
                 </SelectContent>
               </Select>
             ) : (
@@ -99,7 +112,10 @@ export default function BatchProcess() {
                 <Check className="w-5 h-5 text-success" />
               </div>
               <div className="flex-1">
-                <p className="font-medium">Using: {selectedPreset.name}</p>
+                <p className="font-medium">
+                  Using: {selectedPreset.name}
+                  {selectedIsUnsaved ? ' (unsaved)' : ''}
+                </p>
                 <p className="text-sm text-muted-foreground">
                   {selectedPreset.points.length} calibration points •{' '}
                   {selectedPreset.mode === 'advanced' ? 'Multi-point' : '3-point'} mode

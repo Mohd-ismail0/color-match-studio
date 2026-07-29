@@ -5,7 +5,12 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ColorPoint } from '@/types/colorCorrector';
-import { rgbToHex, hexToRgb } from '@/lib/colorCorrection';
+import {
+  rgbToHex,
+  parseHexColor,
+  inferPointRole,
+  defaultTargetForRole,
+} from '@/lib/colorCorrection';
 import { cn } from '@/lib/utils';
 
 interface ColorPointMarkerProps {
@@ -40,20 +45,26 @@ export function ColorPointMarker({
 
   const handleTargetColorChange = (hex: string) => {
     setTargetHex(hex);
-    if (/^#?[0-9A-Fa-f]{6}$/.test(hex)) {
-      const normalized = hex.startsWith('#') ? hex : `#${hex}`;
-      setTargetHex(normalized);
-      onUpdate({
-        ...point,
-        targetColor: hexToRgb(normalized),
-      });
-    }
+    const parsed = parseHexColor(hex);
+    if (!parsed) return;
+    const normalized = hex.startsWith('#') ? hex : `#${hex}`;
+    setTargetHex(normalized);
+    onUpdate({
+      ...point,
+      targetColor: parsed,
+    });
   };
 
   const handleLabelChange = (label: string) => {
+    const role = inferPointRole(label);
+    const shouldUpdateTarget = role !== 'custom' && role !== inferPointRole(point.label, point.role);
     onUpdate({
       ...point,
       label,
+      role,
+      targetColor: shouldUpdateTarget
+        ? defaultTargetForRole(role, point.sampledColor)
+        : point.targetColor,
     });
   };
 

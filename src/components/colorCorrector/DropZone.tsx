@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Upload, ImageIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -22,29 +22,48 @@ export function DropZone({
   children,
 }: DropZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
+  const dragDepthRef = useRef(0);
 
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (disabled) return;
-    setIsDragging(true);
-  }, [disabled]);
+  const handleDragEnter = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (disabled) return;
+      dragDepthRef.current += 1;
+      setIsDragging(true);
+    },
+    [disabled]
+  );
+
+  const handleDragOver = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (disabled) return;
+      setIsDragging(true);
+    },
+    [disabled]
+  );
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    setIsDragging(false);
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDragging(false);
+    }
   }, []);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
       e.stopPropagation();
+      dragDepthRef.current = 0;
       setIsDragging(false);
       if (disabled || maxFiles <= 0) return;
 
-      const files = Array.from(e.dataTransfer.files).filter((file) =>
-        file.type.startsWith('image/')
+      const files = Array.from(e.dataTransfer.files).filter(
+        (file) => file.type.startsWith('image/') && file.type !== 'image/svg+xml'
       );
 
       if (files.length > 0) {
@@ -60,7 +79,11 @@ export function DropZone({
         e.target.value = '';
         return;
       }
-      const files = e.target.files ? Array.from(e.target.files) : [];
+      const files = e.target.files
+        ? Array.from(e.target.files).filter(
+            (file) => file.type.startsWith('image/') && file.type !== 'image/svg+xml'
+          )
+        : [];
       if (files.length > 0) {
         onFilesSelected(files.slice(0, maxFiles));
       }
@@ -81,6 +104,7 @@ export function DropZone({
           : !disabled && 'border-border bg-card hover:border-primary/50 hover:bg-muted/50',
         className
       )}
+      onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
@@ -93,13 +117,15 @@ export function DropZone({
         className="sr-only"
         disabled={disabled || maxFiles <= 0}
       />
-      
+
       {children || (
         <div className="flex flex-col items-center gap-4 p-8 text-center">
-          <div className={cn(
-            "p-4 rounded-full transition-colors",
-            isDragging && !disabled ? "bg-primary/10" : "bg-muted"
-          )}>
+          <div
+            className={cn(
+              'p-4 rounded-full transition-colors',
+              isDragging && !disabled ? 'bg-primary/10' : 'bg-muted'
+            )}
+          >
             {isDragging && !disabled ? (
               <Upload className="w-8 h-8 text-primary animate-bounce" />
             ) : (

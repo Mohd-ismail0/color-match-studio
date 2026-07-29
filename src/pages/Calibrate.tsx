@@ -10,10 +10,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ColorPoint, CalibrationPreset, ColorMatrix } from '@/types/colorCorrector';
 import {
-  calculateMatrix,
+  calculateMatrixDetailed,
   applyColorCorrectionToImage,
   loadImageToCanvas,
   rgbToHex,
+  sampleColorFromCanvas,
+  inferPointRole,
 } from '@/lib/colorCorrection';
 import { savePreset, generatePresetId } from '@/lib/presetStorage';
 import {
@@ -38,10 +40,14 @@ export default function Calibrate() {
   const [presetName, setPresetName] = useState('');
   const [mode, setMode] = useState<'simple' | 'advanced'>('simple');
   const [matrix, setMatrix] = useState<ColorMatrix | null>(null);
+  const [fitWarning, setFitWarning] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(false);
   const [correctedUrl, setCorrectedUrl] = useState<string | null>(null);
   const [editingPreset, setEditingPreset] = useState<CalibrationPreset | null>(null);
   const imageUrlRef = useRef<string | null>(null);
+  const preservePointsOnNextImageRef = useRef(false);
+  const pointsRef = useRef(points);
+  pointsRef.current = points;
 
   useEffect(() => {
     return () => {
@@ -51,35 +57,48 @@ export default function Calibrate() {
     };
   }, []);
 
-  // Load preset from navigation state
   useEffect(() => {
     const preset = location.state?.preset as CalibrationPreset | undefined;
     if (preset) {
       setEditingPreset(preset);
-      setPoints(preset.points);
+      setPoints(
+        preset.points.map((p) => ({
+          ...p,
+          role: p.role ?? inferPointRole(p.label),
+        }))
+      );
       setPresetName(preset.name);
       setMode(preset.mode);
       if (preset.matrix) {
         setMatrix(preset.matrix);
       }
+      // Next uploaded reference image should re-sample, not wipe points
+      preservePointsOnNextImageRef.current = true;
     }
   }, [location.state]);
 
-  // Recalculate matrix when points or mode change
   useEffect(() => {
     if (points.length === 0) {
       setMatrix(null);
+      setFitWarning(null);
       setCorrectedUrl(null);
       return;
     }
 
-    setMatrix(calculateMatrix(points, mode));
+    const result = calculateMatrixDetailed(points, mode);
+    setMatrix(result.matrix);
+    setFitWarning(result.warning ?? null);
+    if (result.warning) {
+      // Soft notice — not an error toast every keystroke
+    }
   }, [points, mode]);
 
-  // Generate preview when matrix changes
   useEffect(() => {
     if (!matrix || !imageFile || !showPreview) {
-      setCorrectedUrl(null);
+      setCorrectedUrl((prev) => {
+        if (prev?.startsWith('blob:')) URL.revokeObjectURL(prev);
+        return null;
+      });
       return;
     }
 
@@ -90,10 +109,15 @@ export default function Calibrate() {
         const canvas = await loadImageToCanvas(imageFile);
         if (cancelled) return;
         const correctedCanvas = applyColorCorrectionToImage(canvas, matrix);
-        const url = correctedCanvas.toDataURL('image/jpeg', 0.9);
-        if (!cancelled) {
-          setCorrectedUrl(url);
-        }
+        const blob = await new Promise<Blob | null>((resolve) =>
+          correctedCanvas.toBlob(resolve, 'image/jpeg', 0.9)
+        );
+        if (cancelled || !blob) return;
+        const url = URL.createObjectURL(blob);
+        setCorrectedUrl((prev) => {
+          if (prev?.startsWith('blob:')) URL.revokeObjectURL(prev);
+          return url;
+        });
       } catch (error) {
         console.error('Failed to generate preview:', error);
         if (!cancelled) {
@@ -108,9 +132,33 @@ export default function Calibrate() {
     };
   }, [matrix, imageFile, showPreview]);
 
+  const resamplePoints = useCallback((canvas: HTMLCanvasElement, sourcePoints: ColorPoint[]) => {
+    return sourcePoints.map((p) => ({
+      ...p,
+      sampledColor: sampleColorFromCanvas(canvas, p.x * canvas.width, p.y * canvas.height, 7),
+      role: p.role ?? inferPointRole(p.label),
+    }));
+  }, []);
+
+  const handleSamplingCanvasReady = useCallback(
+    (canvas: HTMLCanvasElement) => {
+      if (!preservePointsOnNextImageRef.current) return;
+      preservePointsOnNextImageRef.current = false;
+      const current = pointsRef.current;
+      if (current.length === 0) return;
+      setPoints(resamplePoints(canvas, current));
+      toast.success('Re-sampled calibration points on the new image');
+    },
+    [resamplePoints]
+  );
+
   const handleFileSelected = useCallback((files: File[]) => {
     if (files.length === 0) return;
     const file = files[0];
+    if (!file.type.startsWith('image/') || file.type === 'image/svg+xml') {
+      toast.error('Please upload a raster image (JPEG, PNG, WebP, etc.)');
+      return;
+    }
     if (imageUrlRef.current) {
       URL.revokeObjectURL(imageUrlRef.current);
     }
@@ -118,7 +166,10 @@ export default function Calibrate() {
     imageUrlRef.current = url;
     setImageUrl(url);
     setImageFile(file);
-    setPoints([]);
+
+    if (!preservePointsOnNextImageRef.current) {
+      setPoints([]);
+    }
     setCorrectedUrl(null);
     setShowPreview(false);
   }, []);
@@ -126,17 +177,21 @@ export default function Calibrate() {
   const handleClearAll = useCallback(() => {
     setPoints([]);
     setMatrix(null);
+    setFitWarning(null);
     setCorrectedUrl(null);
   }, []);
 
   const handleChangeImage = useCallback(() => {
+    // Keep points when swapping reference while editing
+    if (pointsRef.current.length > 0) {
+      preservePointsOnNextImageRef.current = true;
+    }
     if (imageUrlRef.current) {
       URL.revokeObjectURL(imageUrlRef.current);
       imageUrlRef.current = null;
     }
     setImageUrl(null);
     setImageFile(null);
-    setPoints([]);
     setCorrectedUrl(null);
     setShowPreview(false);
   }, []);
@@ -190,17 +245,17 @@ export default function Calibrate() {
       mode,
     };
 
-    navigate('/batch', { state: { preset } });
+    navigate('/batch', { state: { preset, unsaved: !editingPreset } });
   }, [matrix, editingPreset, presetName, points, mode, navigate]);
 
   const modeHint =
     mode === 'simple'
-      ? 'Quick white balance using white, grey, and black points.'
+      ? 'Locks White/Black levels in linear light. Add Grey or switch to Multi-Point for richer matching.'
       : points.length < 3
-        ? 'Add at least 3 points for multi-point matching (4+ recommended for offset).'
+        ? 'Add at least 3 colorful patches for multi-point matching (4+ recommended).'
         : points.length < 4
-          ? 'Using a 3×3 color matrix. Add a 4th point to include black-level offset.'
-          : 'Least-squares 3×3 matrix with offset for higher accuracy.';
+          ? 'Using a 3×3 linear matrix. Add a 4th point to include offset.'
+          : 'Least-squares 3×3 matrix with offset in linear sRGB (uses all patches including Grey).';
 
   return (
     <div className="min-h-screen bg-background">
@@ -274,6 +329,7 @@ export default function Calibrate() {
                   onPointsChange={setPoints}
                   showCorrected={showPreview}
                   correctedImageUrl={correctedUrl || undefined}
+                  onSamplingCanvasReady={handleSamplingCanvasReady}
                   className="shadow-lg"
                 />
 
@@ -306,6 +362,9 @@ export default function Calibrate() {
                     <p className="text-sm text-muted-foreground">{modeHint}</p>
                   </TabsContent>
                 </Tabs>
+                {fitWarning && (
+                  <p className="text-xs text-warning mt-3">{fitWarning}</p>
+                )}
               </CardContent>
             </Card>
 
