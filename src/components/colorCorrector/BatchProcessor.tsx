@@ -1,6 +1,14 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { BatchImage, CalibrationPreset, ExportSettings, ProcessingProgress } from '@/types/colorCorrector';
-import { loadImageToCanvas, applyColorCorrectionToImage, canvasToBlob } from '@/lib/colorCorrection';
+import {
+  loadImageToCanvas,
+  applyColorCorrectionToImage,
+  canvasToBlob,
+  calculateMatrix,
+  extensionForFormat,
+  formatFromMime,
+  isValidColorMatrix,
+} from '@/lib/colorCorrection';
 import { DropZone } from './DropZone';
 import { ImageThumbnail } from './ImageThumbnail';
 import { Button } from '@/components/ui/button';
@@ -9,7 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Slider } from '@/components/ui/slider';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
-import { Download, Play, X, ImageIcon, RotateCcw } from 'lucide-react';
+import { Download, Play, X, ImageIcon, RotateCcw, Square } from 'lucide-react';
 import JSZip from 'jszip';
 import { toast } from 'sonner';
 
@@ -25,6 +33,16 @@ function revokeUrl(url: string | null | undefined) {
   }
 }
 
+function resolvePresetMatrix(preset: CalibrationPreset): CalibrationPreset['matrix'] {
+  if (isValidColorMatrix(preset.matrix)) {
+    return preset.matrix;
+  }
+  if (preset.points.length > 0) {
+    return calculateMatrix(preset.points, preset.mode);
+  }
+  return null;
+}
+
 export function BatchProcessor({ preset }: BatchProcessorProps) {
   const [images, setImages] = useState<BatchImage[]>([]);
   const [progress, setProgress] = useState<ProcessingProgress | null>(null);
@@ -35,10 +53,12 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
   });
   const imagesRef = useRef(images);
   imagesRef.current = images;
+  const cancelRef = useRef(false);
+  const activePresetIdRef = useRef<string | null>(null);
 
-  // Cleanup object URLs on unmount
   useEffect(() => {
     return () => {
+      cancelRef.current = true;
       imagesRef.current.forEach((img) => {
         revokeUrl(img.originalUrl);
         revokeUrl(img.correctedUrl);
@@ -46,30 +66,70 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
     };
   }, []);
 
-  const handleFilesSelected = useCallback((files: File[]) => {
+  // Invalidate completed results when preset or encode settings change
+  useEffect(() => {
+    const presetId = preset?.id ?? null;
+    const presetChanged = activePresetIdRef.current !== null && activePresetIdRef.current !== presetId;
+    activePresetIdRef.current = presetId;
+
     setImages((prev) => {
-      const remaining = MAX_BATCH_FILES - prev.length;
-      if (remaining <= 0) {
-        toast.error(`Maximum of ${MAX_BATCH_FILES} images reached`);
-        return prev;
-      }
+      let changed = false;
+      const next = prev.map((img) => {
+        if (img.status !== 'completed' || !img.processedWith) return img;
 
-      const accepted = files.slice(0, remaining);
-      if (accepted.length < files.length) {
-        toast.warning(`Only ${accepted.length} of ${files.length} images added (limit ${MAX_BATCH_FILES})`);
-      }
+        const stalePreset = presetChanged || img.processedWith.presetId !== (presetId ?? '');
+        const staleExport =
+          img.processedWith.format !== exportSettings.format ||
+          (exportSettings.format === 'jpeg' &&
+            Math.abs(img.processedWith.quality - exportSettings.quality) > 0.001);
 
-      const newImages: BatchImage[] = accepted.map((file, index) => ({
-        id: `img_${Date.now()}_${index}_${Math.random().toString(36).substring(2, 7)}`,
-        file,
-        originalUrl: URL.createObjectURL(file),
-        correctedUrl: null,
-        status: 'pending',
-        excluded: false,
-      }));
+        if (!stalePreset && !staleExport) return img;
 
-      return [...prev, ...newImages];
+        changed = true;
+        revokeUrl(img.correctedUrl);
+        return {
+          ...img,
+          status: 'pending' as const,
+          correctedUrl: null,
+          processedWith: undefined,
+          error: undefined,
+        };
+      });
+      return changed ? next : prev;
     });
+  }, [preset?.id, exportSettings.format, exportSettings.quality]);
+
+  const handleFilesSelected = useCallback((files: File[]) => {
+    const currentCount = imagesRef.current.length;
+    const remaining = MAX_BATCH_FILES - currentCount;
+    if (remaining <= 0) {
+      toast.error(`Maximum of ${MAX_BATCH_FILES} images reached`);
+      return;
+    }
+
+    const raster = files.filter(
+      (file) => file.type.startsWith('image/') && file.type !== 'image/svg+xml'
+    );
+    if (raster.length === 0) {
+      toast.error('No supported raster images found');
+      return;
+    }
+
+    const accepted = raster.slice(0, remaining);
+    if (accepted.length < raster.length) {
+      toast.warning(`Only ${accepted.length} of ${raster.length} images added (limit ${MAX_BATCH_FILES})`);
+    }
+
+    const newImages: BatchImage[] = accepted.map((file, index) => ({
+      id: `img_${Date.now()}_${index}_${Math.random().toString(36).substring(2, 7)}`,
+      file,
+      originalUrl: URL.createObjectURL(file),
+      correctedUrl: null,
+      status: 'pending',
+      excluded: false,
+    }));
+
+    setImages((prev) => [...prev, ...newImages]);
   }, []);
 
   const handleToggleExclude = useCallback((id: string) => {
@@ -78,7 +138,19 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
     );
   }, []);
 
+  const handleRemoveImage = useCallback((id: string) => {
+    setImages((prev) => {
+      const target = prev.find((img) => img.id === id);
+      if (target) {
+        revokeUrl(target.originalUrl);
+        revokeUrl(target.correctedUrl);
+      }
+      return prev.filter((img) => img.id !== id);
+    });
+  }, []);
+
   const handleRemoveAll = useCallback(() => {
+    cancelRef.current = true;
     imagesRef.current.forEach((img) => {
       revokeUrl(img.originalUrl);
       revokeUrl(img.correctedUrl);
@@ -88,8 +160,14 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
   }, []);
 
   const processImages = useCallback(async (reprocessAll = false) => {
-    if (!preset?.matrix) {
+    if (!preset) {
       toast.error('Select a calibration preset first');
+      return;
+    }
+
+    const matrix = resolvePresetMatrix(preset);
+    if (!matrix) {
+      toast.error('Preset has no usable calibration matrix');
       return;
     }
 
@@ -107,6 +185,7 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
       return;
     }
 
+    cancelRef.current = false;
     const total = toProcess.length;
     setProgress({ current: 0, total, percentage: 0 });
 
@@ -114,6 +193,11 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
     let errorCount = 0;
 
     for (let i = 0; i < toProcess.length; i++) {
+      if (cancelRef.current) {
+        toast.info('Processing cancelled');
+        break;
+      }
+
       const img = toProcess[i];
 
       setImages((prev) =>
@@ -124,7 +208,9 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
 
       try {
         const canvas = await loadImageToCanvas(img.file);
-        const correctedCanvas = applyColorCorrectionToImage(canvas, preset.matrix);
+        if (cancelRef.current) break;
+
+        const correctedCanvas = applyColorCorrectionToImage(canvas, matrix);
         const blob = await canvasToBlob(
           correctedCanvas,
           exportSettings.format,
@@ -136,7 +222,17 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
           prev.map((item) => {
             if (item.id !== img.id) return item;
             revokeUrl(item.correctedUrl);
-            return { ...item, status: 'completed', correctedUrl, error: undefined };
+            return {
+              ...item,
+              status: 'completed',
+              correctedUrl,
+              error: undefined,
+              processedWith: {
+                presetId: preset.id,
+                format: exportSettings.format,
+                quality: exportSettings.quality,
+              },
+            };
           })
         );
         successCount += 1;
@@ -144,7 +240,11 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
         setImages((prev) =>
           prev.map((item) =>
             item.id === img.id
-              ? { ...item, status: 'error', error: error instanceof Error ? error.message : String(error) }
+              ? {
+                  ...item,
+                  status: 'error',
+                  error: error instanceof Error ? error.message : String(error),
+                }
               : item
           )
         );
@@ -156,9 +256,14 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
         total,
         percentage: Math.round(((i + 1) / total) * 100),
       });
+
+      // Yield to keep UI responsive on large batches
+      await new Promise((r) => setTimeout(r, 0));
     }
 
     setProgress(null);
+
+    if (cancelRef.current) return;
 
     if (errorCount === 0) {
       toast.success(`Processed ${successCount} image${successCount === 1 ? '' : 's'}`);
@@ -174,7 +279,11 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
       try {
         const response = await fetch(image.correctedUrl);
         const blob = await response.blob();
-        const ext = exportSettings.format === 'jpeg' ? 'jpg' : 'png';
+        const format = formatFromMime(
+          blob.type || image.processedWith?.format,
+          exportSettings.format
+        );
+        const ext = extensionForFormat(format);
         const baseName = image.file.name.replace(/\.[^/.]+$/, '');
         const fileName = `${baseName}${exportSettings.suffix}.${ext}`;
 
@@ -199,13 +308,17 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
 
     try {
       const zip = new JSZip();
-      const ext = exportSettings.format === 'jpeg' ? 'jpg' : 'png';
       const usedNames = new Set<string>();
 
       for (const img of completed) {
         if (!img.correctedUrl) continue;
         const response = await fetch(img.correctedUrl);
         const blob = await response.blob();
+        const format = formatFromMime(
+          blob.type || img.processedWith?.format,
+          exportSettings.format
+        );
+        const ext = extensionForFormat(format);
         const baseName = img.file.name.replace(/\.[^/.]+$/, '');
         let fileName = `${baseName}${exportSettings.suffix}.${ext}`;
         let counter = 1;
@@ -236,6 +349,13 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
   ).length;
   const isProcessing = progress !== null;
   const remainingSlots = Math.max(0, MAX_BATCH_FILES - images.length);
+  const hasStaleCompleted = images.some(
+    (img) =>
+      img.status === 'completed' &&
+      img.processedWith &&
+      (img.processedWith.presetId !== (preset?.id ?? '') ||
+        img.processedWith.format !== exportSettings.format)
+  );
 
   return (
     <div className="space-y-6">
@@ -243,12 +363,18 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
         onFilesSelected={handleFilesSelected}
         multiple
         maxFiles={remainingSlots || MAX_BATCH_FILES}
-        disabled={remainingSlots === 0}
+        disabled={remainingSlots === 0 || isProcessing}
         className="min-h-[200px]"
       />
 
       {images.length > 0 && (
         <>
+          {hasStaleCompleted && (
+            <div className="p-3 rounded-lg bg-warning/10 border border-warning/30 text-sm text-warning">
+              Some results are out of date after preset/export changes. Reprocess before downloading.
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center gap-4 p-4 bg-card rounded-lg border">
             <div className="flex items-center gap-2">
               <ImageIcon className="w-4 h-4 text-muted-foreground" />
@@ -313,24 +439,36 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
             <div className="flex items-center gap-2">
               <Button
                 onClick={() => processImages(false)}
-                disabled={!preset?.matrix || pendingCount === 0 || isProcessing}
+                disabled={!preset || pendingCount === 0 || isProcessing}
               >
                 <Play className="w-4 h-4 mr-2" />
                 Process {pendingCount > 0 ? `(${pendingCount})` : ''}
               </Button>
 
-              {completedCount > 0 && (
+              {isProcessing && (
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    cancelRef.current = true;
+                  }}
+                >
+                  <Square className="w-4 h-4 mr-2" />
+                  Cancel
+                </Button>
+              )}
+
+              {completedCount > 0 && !isProcessing && (
                 <>
                   <Button
                     variant="secondary"
                     onClick={() => processImages(true)}
-                    disabled={!preset?.matrix || isProcessing}
+                    disabled={!preset}
                     title="Reprocess all included images with current settings"
                   >
                     <RotateCcw className="w-4 h-4 mr-2" />
                     Reprocess
                   </Button>
-                  <Button variant="outline" onClick={downloadAll} disabled={isProcessing}>
+                  <Button variant="outline" onClick={downloadAll}>
                     <Download className="w-4 h-4 mr-2" />
                     Download All
                   </Button>
@@ -362,13 +500,14 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
                 image={image}
                 onToggleExclude={handleToggleExclude}
                 onDownload={downloadSingle}
+                onRemove={handleRemoveImage}
               />
             ))}
           </div>
         </>
       )}
 
-      {!preset?.matrix && images.length > 0 && (
+      {!preset && images.length > 0 && (
         <div className="p-4 rounded-lg bg-warning/10 border border-warning/30 text-center">
           <p className="text-sm text-warning">
             Please create or select a calibration preset first to process images.

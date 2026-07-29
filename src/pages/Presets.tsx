@@ -1,13 +1,17 @@
-import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect, useRef } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
 import { Header } from '@/components/colorCorrector/Header';
 import { PresetCard } from '@/components/colorCorrector/PresetCard';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { CalibrationPreset } from '@/types/colorCorrector';
-import { getAllPresets, deletePreset } from '@/lib/presetStorage';
-import { Settings2, Search, BookMarked } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import {
+  getAllPresets,
+  deletePreset,
+  exportPresetsToJson,
+  importPresetsFromJson,
+} from '@/lib/presetStorage';
+import { Settings2, Search, BookMarked, Download, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   AlertDialog,
@@ -22,6 +26,7 @@ import {
 
 export default function Presets() {
   const navigate = useNavigate();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [presets, setPresets] = useState<CalibrationPreset[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -55,10 +60,41 @@ export default function Presets() {
     }
   };
 
+  const handleExport = () => {
+    const json = exportPresetsToJson(presets);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `colorfix-presets-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success('Presets exported');
+  };
+
+  const handleImportFile = async (file: File) => {
+    try {
+      const text = await file.text();
+      const { imported, skipped } = importPresetsFromJson(text);
+      setPresets(getAllPresets());
+      if (imported === 0) {
+        toast.error('No valid presets found in file');
+        return;
+      }
+      toast.success(
+        `Imported ${imported} preset${imported === 1 ? '' : 's'}${
+          skipped ? ` (${skipped} skipped)` : ''
+        }`
+      );
+    } catch {
+      toast.error('Failed to import presets — invalid JSON');
+    }
+  };
+
   return (
     <div className="min-h-screen bg-background">
       <Header />
-      
+
       <main className="container py-8 space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
@@ -68,12 +104,35 @@ export default function Presets() {
             </p>
           </div>
 
-          <Button asChild>
-            <Link to="/calibrate">
-              <Settings2 className="w-4 h-4 mr-2" />
-              New Preset
-            </Link>
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleImportFile(file);
+                e.target.value = '';
+              }}
+            />
+            <Button variant="outline" onClick={() => fileInputRef.current?.click()}>
+              <Upload className="w-4 h-4 mr-2" />
+              Import
+            </Button>
+            {presets.length > 0 && (
+              <Button variant="outline" onClick={handleExport}>
+                <Download className="w-4 h-4 mr-2" />
+                Export
+              </Button>
+            )}
+            <Button asChild>
+              <Link to="/calibrate">
+                <Settings2 className="w-4 h-4 mr-2" />
+                New Preset
+              </Link>
+            </Button>
+          </div>
         </div>
 
         {presets.length > 0 && (
@@ -95,14 +154,21 @@ export default function Presets() {
             </div>
             <h3 className="text-xl font-medium mb-2">No presets yet</h3>
             <p className="text-muted-foreground mb-6 max-w-md">
-              Create your first calibration preset to start correcting product photos with consistent colors.
+              Create your first calibration preset to start correcting product photos with consistent
+              colors, or import a previously exported library.
             </p>
-            <Button asChild size="lg">
-              <Link to="/calibrate">
-                <Settings2 className="w-5 h-5 mr-2" />
-                Create Your First Preset
-              </Link>
-            </Button>
+            <div className="flex flex-wrap justify-center gap-3">
+              <Button asChild size="lg">
+                <Link to="/calibrate">
+                  <Settings2 className="w-5 h-5 mr-2" />
+                  Create Your First Preset
+                </Link>
+              </Button>
+              <Button size="lg" variant="outline" onClick={() => fileInputRef.current?.click()}>
+                <Upload className="w-5 h-5 mr-2" />
+                Import Presets
+              </Button>
+            </div>
           </div>
         ) : filteredPresets.length === 0 ? (
           <div className="text-center py-12">
@@ -133,7 +199,10 @@ export default function Presets() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={confirmDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+            <AlertDialogAction
+              onClick={confirmDelete}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
               Delete
             </AlertDialogAction>
           </AlertDialogFooter>

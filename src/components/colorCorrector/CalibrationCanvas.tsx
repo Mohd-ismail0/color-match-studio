@@ -1,6 +1,11 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
-import { ColorPoint, RGB } from '@/types/colorCorrector';
-import { sampleColorFromCanvas, hexToRgb } from '@/lib/colorCorrection';
+import { ColorPoint } from '@/types/colorCorrector';
+import {
+  sampleColorFromCanvas,
+  nextAutoRole,
+  defaultTargetForRole,
+  defaultLabelForRole,
+} from '@/lib/colorCorrection';
 import { ColorPointMarker } from './ColorPointMarker';
 import { cn } from '@/lib/utils';
 
@@ -11,21 +16,8 @@ interface CalibrationCanvasProps {
   showCorrected?: boolean;
   correctedImageUrl?: string;
   className?: string;
-}
-
-function defaultLabel(existingLabels: string[], index: number): string {
-  if (!existingLabels.includes('white')) return 'White';
-  if (!existingLabels.includes('grey') && !existingLabels.includes('gray')) return 'Grey';
-  if (!existingLabels.includes('black')) return 'Black';
-  return `Point ${index + 1}`;
-}
-
-function defaultTarget(label: string, sampledColor: RGB): RGB {
-  const normalized = label.toLowerCase();
-  if (normalized === 'white') return hexToRgb('#FFFFFF');
-  if (normalized === 'grey' || normalized === 'gray') return hexToRgb('#808080');
-  if (normalized === 'black') return hexToRgb('#000000');
-  return { ...sampledColor };
+  /** Called when the sampling canvas is ready (e.g. to re-sample existing points) */
+  onSamplingCanvasReady?: (canvas: HTMLCanvasElement) => void;
 }
 
 export function CalibrationCanvas({
@@ -35,18 +27,21 @@ export function CalibrationCanvas({
   showCorrected = false,
   correctedImageUrl,
   className,
+  onSamplingCanvasReady,
 }: CalibrationCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const imageRef = useRef<HTMLImageElement | null>(null);
+  const loadIdRef = useRef(0);
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
+    const loadId = ++loadIdRef.current;
     setIsLoaded(false);
+
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
-      imageRef.current = img;
+      if (loadId !== loadIdRef.current) return;
       const canvas = canvasRef.current;
       if (canvas) {
         canvas.width = img.naturalWidth || img.width;
@@ -55,19 +50,20 @@ export function CalibrationCanvas({
         if (ctx) {
           ctx.drawImage(img, 0, 0);
         }
+        onSamplingCanvasReady?.(canvas);
       }
       setIsLoaded(true);
     };
     img.onerror = () => {
+      if (loadId !== loadIdRef.current) return;
       setIsLoaded(false);
     };
     img.src = imageUrl;
-  }, [imageUrl]);
+  }, [imageUrl, onSamplingCanvasReady]);
 
   const handleCanvasClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       if (!containerRef.current || !canvasRef.current || !isLoaded) return;
-      // Ignore clicks originating from markers / popovers
       if ((e.target as HTMLElement).closest('[data-color-point-marker]')) return;
 
       const rect = containerRef.current.getBoundingClientRect();
@@ -84,9 +80,9 @@ export function CalibrationCanvas({
         7
       );
 
-      const existingLabels = points.map((p) => p.label.toLowerCase());
-      const label = defaultLabel(existingLabels, points.length);
-      const targetColor = defaultTarget(label, sampledColor);
+      const role = nextAutoRole(points);
+      const label = defaultLabelForRole(role, points.length);
+      const targetColor = defaultTargetForRole(role, sampledColor);
 
       const newPoint: ColorPoint = {
         id: `point_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
@@ -95,6 +91,7 @@ export function CalibrationCanvas({
         sampledColor,
         targetColor,
         label,
+        role,
       };
 
       onPointsChange([...points, newPoint]);
@@ -160,17 +157,17 @@ export function CalibrationCanvas({
 
         <canvas ref={canvasRef} className="hidden" aria-hidden="true" />
 
-        {!showCorrected &&
-          points.map((point) => (
-            <ColorPointMarker
-              key={point.id}
-              point={point}
-              onUpdate={handlePointUpdate}
-              onDelete={handlePointDelete}
-              onMove={handlePointMove}
-              containerRef={containerRef}
-            />
-          ))}
+        {/* Keep markers visible during preview so patch hits stay editable */}
+        {points.map((point) => (
+          <ColorPointMarker
+            key={point.id}
+            point={point}
+            onUpdate={handlePointUpdate}
+            onDelete={handlePointDelete}
+            onMove={handlePointMove}
+            containerRef={containerRef}
+          />
+        ))}
       </div>
 
       {!isLoaded && (
