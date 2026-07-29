@@ -16,9 +16,12 @@ export function PresetCard({ preset, onApply, onEdit, onDelete }: PresetCardProp
   return (
     <Card className="group hover:shadow-md transition-shadow">
       <CardHeader className="pb-2">
-        <div className="flex items-start justify-between gap-2">
-          <CardTitle className="text-base line-clamp-1">{preset.name}</CardTitle>
-          <Badge variant={preset.mode === 'advanced' ? 'default' : 'secondary'}>
+        <div className="flex items-start justify-between gap-2 min-w-0">
+          <CardTitle className="text-base line-clamp-2 min-w-0 break-words">{preset.name}</CardTitle>
+          <Badge
+            variant={preset.mode === 'advanced' ? 'default' : 'secondary'}
+            className="shrink-0"
+          >
             {preset.mode === 'advanced' ? 'Multi-point' : '3-Point'}
           </Badge>
         </div>
@@ -28,15 +31,15 @@ export function PresetCard({ preset, onApply, onEdit, onDelete }: PresetCardProp
           {preset.points.slice(0, 5).map((point) => (
             <div
               key={point.id}
-              className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-muted text-xs"
+              className="flex items-center gap-1 max-w-full px-2 py-0.5 rounded-full bg-muted text-xs"
             >
               <div
-                className="w-2.5 h-2.5 rounded-full border border-border"
+                className="w-2.5 h-2.5 rounded-full border border-border shrink-0"
                 style={{
                   backgroundColor: `rgb(${point.targetColor.r}, ${point.targetColor.g}, ${point.targetColor.b})`,
                 }}
               />
-              <span className="text-muted-foreground">{point.label}</span>
+              <span className="text-muted-foreground truncate max-w-[7rem]">{point.label}</span>
             </div>
           ))}
           {preset.points.length > 5 && (
@@ -45,24 +48,31 @@ export function PresetCard({ preset, onApply, onEdit, onDelete }: PresetCardProp
             </span>
           )}
         </div>
-        
+
         <p className="text-xs text-muted-foreground">
           Updated {formatDistanceToNow(preset.updatedAt, { addSuffix: true })}
         </p>
 
         <div className="flex items-center gap-2 pt-1">
-          <Button size="sm" className="flex-1" onClick={() => onApply(preset)}>
+          <Button size="sm" className="flex-1 min-h-9" onClick={() => onApply(preset)}>
             <Play className="w-3.5 h-3.5 mr-1" />
             Apply
           </Button>
-          <Button size="sm" variant="outline" onClick={() => onEdit(preset)}>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-9 w-9 px-0"
+            onClick={() => onEdit(preset)}
+            aria-label={`Edit ${preset.name}`}
+          >
             <Edit className="w-3.5 h-3.5" />
           </Button>
           <Button
             size="sm"
             variant="outline"
-            className="text-destructive hover:text-destructive"
+            className="h-9 w-9 px-0 text-destructive hover:text-destructive"
             onClick={() => onDelete(preset.id)}
+            aria-label={`Delete ${preset.name}`}
           >
             <Trash2 className="w-3.5 h-3.5" />
           </Button>

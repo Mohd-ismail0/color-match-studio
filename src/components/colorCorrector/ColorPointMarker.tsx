@@ -147,9 +147,9 @@ export function ColorPointMarker({
           type="button"
           data-color-point-marker
           className={cn(
-            "absolute w-6 h-6 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-background shadow-lg cursor-grab transition-transform hover:scale-125 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 active:cursor-grabbing",
-            isOpen && "scale-125 ring-2 ring-ring ring-offset-2",
-            isDragging && "scale-125 cursor-grabbing"
+            "absolute w-11 h-11 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-background shadow-lg cursor-grab transition-transform hover:scale-110 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 active:cursor-grabbing touch-none",
+            isOpen && "scale-110 ring-2 ring-ring ring-offset-2",
+            isDragging && "scale-110 cursor-grabbing"
           )}
           style={{
             left: `${point.x * 100}%`,
@@ -161,19 +161,23 @@ export function ColorPointMarker({
           onPointerUp={handlePointerEnd}
           onPointerCancel={handlePointerEnd}
           onClick={handleClick}
-        >
-          <span className="sr-only">Edit point: {point.label}</span>
-        </button>
+          aria-label={`Edit point: ${point.label}`}
+        />
       </PopoverTrigger>
       
-      <PopoverContent className="w-72" align="start">
+      <PopoverContent
+        className="w-[min(18rem,calc(100vw-2rem))]"
+        align="start"
+        collisionPadding={12}
+      >
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h4 className="font-medium text-sm">Edit Color Point</h4>
             <Button
               variant="ghost"
               size="icon"
-              className="h-6 w-6"
+              className="h-9 w-9"
+              aria-label="Delete point"
               onClick={() => {
                 onDelete(point.id);
                 setIsOpen(false);
@@ -193,12 +197,12 @@ export function ColorPointMarker({
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label className="text-xs text-muted-foreground">Sampled</Label>
               <div className="flex items-center gap-2">
                 <div
-                  className="w-8 h-8 rounded border border-border"
+                  className="w-8 h-8 rounded border border-border shrink-0"
                   style={{ backgroundColor: rgbToHex(point.sampledColor) }}
                 />
                 <span className="text-xs font-mono">
@@ -209,19 +213,20 @@ export function ColorPointMarker({
             
             <div className="space-y-2">
               <Label htmlFor={`target-${point.id}`} className="text-xs">Target</Label>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 min-w-0">
                 <input
                   type="color"
                   value={targetHex}
                   onChange={(e) => handleTargetColorChange(e.target.value)}
-                  className="w-8 h-8 rounded border border-border cursor-pointer"
+                  className="w-8 h-8 rounded border border-border cursor-pointer shrink-0"
+                  aria-label="Pick target color"
                 />
                 <Input
                   id={`target-${point.id}`}
                   value={targetHex}
                   onChange={(e) => handleTargetColorChange(e.target.value)}
                   placeholder="#FFFFFF"
-                  className="h-8 text-xs font-mono"
+                  className="h-8 text-xs font-mono min-w-0"
                 />
               </div>
             </div>

@@ -364,30 +364,34 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
         multiple
         maxFiles={remainingSlots || MAX_BATCH_FILES}
         disabled={remainingSlots === 0 || isProcessing}
-        className="min-h-[200px]"
+        className="min-h-[160px] sm:min-h-[200px]"
       />
 
       {images.length > 0 && (
         <>
           {hasStaleCompleted && (
-            <div className="p-3 rounded-lg bg-warning/10 border border-warning/30 text-sm text-warning">
-              Some results are out of date after preset/export changes. Reprocess before downloading.
+            <div
+              role="status"
+              className="p-3 rounded-lg bg-warning/15 border border-warning/40 text-sm text-foreground"
+            >
+              <span className="font-medium text-warning">Out of date:</span>{' '}
+              Some results need reprocessing after preset or export changes.
             </div>
           )}
 
-          <div className="flex flex-wrap items-center gap-4 p-4 bg-card rounded-lg border">
-            <div className="flex items-center gap-2">
-              <ImageIcon className="w-4 h-4 text-muted-foreground" />
-              <span className="text-sm font-medium">
+          <div className="space-y-4 p-3 sm:p-4 bg-card rounded-lg border">
+            <div className="flex items-center gap-2 min-w-0">
+              <ImageIcon className="w-4 h-4 text-muted-foreground shrink-0" aria-hidden="true" />
+              <span className="text-sm font-medium truncate">
                 {images.length} images • {completedCount} processed
               </span>
             </div>
 
-            <div className="flex-1" />
-
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-2">
-                <Label className="text-xs text-muted-foreground">Format</Label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              <div className="space-y-1.5 min-w-0">
+                <Label htmlFor="export-format" className="text-xs text-muted-foreground">
+                  Format
+                </Label>
                 <Select
                   value={exportSettings.format}
                   onValueChange={(v) =>
@@ -395,7 +399,7 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
                   }
                   disabled={isProcessing}
                 >
-                  <SelectTrigger className="w-20 h-8">
+                  <SelectTrigger id="export-format" className="w-full h-10">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -406,9 +410,12 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
               </div>
 
               {exportSettings.format === 'jpeg' && (
-                <div className="flex items-center gap-2">
-                  <Label className="text-xs text-muted-foreground">Quality</Label>
+                <div className="space-y-1.5 min-w-0">
+                  <Label htmlFor="export-quality" className="text-xs text-muted-foreground">
+                    Quality ({Math.round(exportSettings.quality * 100)}%)
+                  </Label>
                   <Slider
+                    id="export-quality"
                     value={[exportSettings.quality * 100]}
                     onValueChange={([v]) =>
                       setExportSettings((s) => ({ ...s, quality: v / 100 }))
@@ -416,28 +423,31 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
                     min={50}
                     max={100}
                     step={1}
-                    className="w-20"
+                    className="w-full py-3"
                     disabled={isProcessing}
                   />
-                  <span className="text-xs w-8">{Math.round(exportSettings.quality * 100)}%</span>
                 </div>
               )}
 
-              <div className="flex items-center gap-2">
-                <Label className="text-xs text-muted-foreground">Suffix</Label>
+              <div className="space-y-1.5 min-w-0">
+                <Label htmlFor="export-suffix" className="text-xs text-muted-foreground">
+                  Suffix
+                </Label>
                 <Input
+                  id="export-suffix"
                   value={exportSettings.suffix}
                   onChange={(e) =>
                     setExportSettings((s) => ({ ...s, suffix: e.target.value }))
                   }
-                  className="w-28 h-8"
+                  className="w-full h-10"
                   disabled={isProcessing}
                 />
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap gap-2">
               <Button
+                className="flex-1 sm:flex-none min-h-10"
                 onClick={() => processImages(false)}
                 disabled={!preset || pendingCount === 0 || isProcessing}
               >
@@ -448,6 +458,7 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
               {isProcessing && (
                 <Button
                   variant="secondary"
+                  className="min-h-10"
                   onClick={() => {
                     cancelRef.current = true;
                   }}
@@ -461,6 +472,7 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
                 <>
                   <Button
                     variant="secondary"
+                    className="min-h-10"
                     onClick={() => processImages(true)}
                     disabled={!preset}
                     title="Reprocess all included images with current settings"
@@ -468,14 +480,21 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
                     <RotateCcw className="w-4 h-4 mr-2" />
                     Reprocess
                   </Button>
-                  <Button variant="outline" onClick={downloadAll}>
+                  <Button variant="outline" className="min-h-10" onClick={downloadAll}>
                     <Download className="w-4 h-4 mr-2" />
-                    Download All
+                    Download
                   </Button>
                 </>
               )}
 
-              <Button variant="ghost" size="icon" onClick={handleRemoveAll} disabled={isProcessing}>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-10 w-10"
+                onClick={handleRemoveAll}
+                disabled={isProcessing}
+                aria-label="Remove all images"
+              >
                 <X className="w-4 h-4" />
               </Button>
             </div>
@@ -483,9 +502,9 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
 
           {progress && (
             <div className="space-y-2">
-              <div className="flex items-center justify-between text-sm">
+              <div className="flex items-center justify-between text-sm gap-2">
                 <span>Processing images...</span>
-                <span className="text-muted-foreground">
+                <span className="text-muted-foreground shrink-0">
                   {progress.current} / {progress.total}
                 </span>
               </div>
@@ -493,7 +512,7 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
             </div>
           )}
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+          <div className="grid grid-cols-1 min-[360px]:grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4">
             {images.map((image) => (
               <ImageThumbnail
                 key={image.id}
@@ -508,8 +527,11 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
       )}
 
       {!preset && images.length > 0 && (
-        <div className="p-4 rounded-lg bg-warning/10 border border-warning/30 text-center">
-          <p className="text-sm text-warning">
+        <div
+          role="status"
+          className="p-4 rounded-lg bg-warning/15 border border-warning/40 text-center"
+        >
+          <p className="text-sm text-foreground">
             Please create or select a calibration preset first to process images.
           </p>
         </div>

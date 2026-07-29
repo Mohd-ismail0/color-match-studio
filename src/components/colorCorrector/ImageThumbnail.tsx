@@ -40,76 +40,71 @@ export function ImageThumbnail({
 
         {image.status === 'processing' && (
           <div className="absolute inset-0 flex items-center justify-center bg-background/80">
-            <Loader2 className="w-6 h-6 animate-spin text-primary" />
+            <Loader2 className="w-6 h-6 animate-spin text-primary" aria-label="Processing" />
           </div>
         )}
 
         {image.status === 'error' && (
           <div className="absolute inset-0 flex items-center justify-center bg-destructive/10">
-            <AlertCircle className="w-6 h-6 text-destructive" />
+            <AlertCircle className="w-6 h-6 text-destructive" aria-label="Error" />
           </div>
         )}
       </div>
 
-      <div className="absolute inset-0 bg-gradient-to-t from-background/90 via-transparent to-transparent opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-        <div className="absolute bottom-0 left-0 right-0 p-2 space-y-2">
-          <p className="text-xs font-medium truncate text-foreground">{image.file.name}</p>
+      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-background/95 via-background/70 to-transparent p-2 pt-8 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity">
+        <p className="text-xs font-medium truncate text-foreground mb-2">{image.file.name}</p>
 
-          <div className="flex items-center gap-1">
-            {image.correctedUrl && (
-              <Button
-                size="sm"
-                variant="secondary"
-                className="h-7 px-2 text-xs"
-                onClick={() => setShowCorrected(!showCorrected)}
-              >
-                {showCorrected ? (
-                  <>
-                    <Eye className="w-3 h-3 mr-1" /> Corrected
-                  </>
-                ) : (
-                  <>
-                    <EyeOff className="w-3 h-3 mr-1" /> Original
-                  </>
-                )}
-              </Button>
-            )}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {image.correctedUrl && (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="h-9 px-2.5 text-xs"
+              onClick={() => setShowCorrected(!showCorrected)}
+              aria-label={showCorrected ? 'Show original' : 'Show corrected'}
+            >
+              {showCorrected ? (
+                <Eye className="w-3.5 h-3.5 sm:mr-1" />
+              ) : (
+                <EyeOff className="w-3.5 h-3.5 sm:mr-1" />
+              )}
+              <span className="hidden sm:inline">{showCorrected ? 'Corrected' : 'Original'}</span>
+            </Button>
+          )}
 
-            {image.status === 'completed' && (
-              <Button
-                size="sm"
-                variant="secondary"
-                className="h-7 px-2"
-                onClick={() => onDownload(image)}
-              >
-                <Download className="w-3 h-3" />
-              </Button>
-            )}
+          {image.status === 'completed' && (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="h-9 w-9 px-0"
+              onClick={() => onDownload(image)}
+              aria-label={`Download ${image.file.name}`}
+            >
+              <Download className="w-3.5 h-3.5" />
+            </Button>
+          )}
 
-            {onRemove && (
-              <Button
-                size="sm"
-                variant="secondary"
-                className="h-7 px-2"
-                onClick={() => onRemove(image.id)}
-              >
-                <Trash2 className="w-3 h-3" />
-              </Button>
-            )}
-          </div>
+          {onRemove && (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="h-9 w-9 px-0"
+              onClick={() => onRemove(image.id)}
+              aria-label={`Remove ${image.file.name}`}
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </Button>
+          )}
         </div>
       </div>
 
-      <div className="absolute top-2 left-2 flex items-center gap-1.5 rounded bg-background/80 px-1.5 py-1">
+      <div className="absolute top-2 left-2 flex items-center gap-1.5 rounded-md bg-background/90 px-1.5 py-1.5 shadow-sm">
         <Checkbox
           checked={!image.excluded}
           onCheckedChange={() => onToggleExclude(image.id)}
-          className="border-border"
+          className="h-5 w-5 border-border"
           aria-label={image.excluded ? 'Include image' : 'Exclude image'}
         />
-        <span className="text-[10px] text-muted-foreground hidden sm:inline">
-          {image.excluded ? 'Off' : 'On'}
-        </span>
       </div>
 
       <div className="absolute top-2 right-2">
