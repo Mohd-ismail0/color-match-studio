@@ -14,6 +14,7 @@ COPY api/package.json api/package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 FROM node:22.23.1-bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
     PORT=8081 \
