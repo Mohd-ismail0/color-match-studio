@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -395,7 +395,7 @@ describe('calibration persistence and explicit revisions', () => {
 
   it('rejects a stored matrix that is not the engine fit even with a recomputed hash', async () => {
     const created = await createProfile('Tamper target');
-    const original = server.store.getRevision(created.profileId, 1);
+    const original = await server.store.getRevision(created.profileId, 1);
     expect(original).not.toBeNull();
 
     const forged: ColorMatrix = {
@@ -805,10 +805,10 @@ describe('store safety and immutability', () => {
     );
   });
 
-  it('blocks in-place updates/deletes of revisions at the database layer', () => {
+  it('blocks in-place updates/deletes of revisions at the database layer', async () => {
     const storePath = path.join(dir, 'immutability.sqlite');
     const store = new CalibrationStore(storePath);
-    const created = store.createProfile('Immutable', {
+    const created = await store.createProfile('Immutable', {
       points,
       matrix: calculateMatrixDetailed(points, 'simple').matrix,
       mode: 'simple',
@@ -831,6 +831,79 @@ describe('store safety and immutability', () => {
     expect(() => db.prepare('DELETE FROM revisions WHERE profile_id = ?').run(created.profile.id)).toThrow(
       /immutable/
     );
-    store.close();
+    await store.close();
+  });
+});
+
+describe('idempotent writes, readiness and explicit revision addressing', () => {
+  const idempotent = (key: string) => ({ ...AUTH, 'Idempotency-Key': key });
+
+  it('replays a create instead of storing a second profile', async () => {
+    const key = `create:${randomUUID()}`;
+    const body = { name: 'Idempotent studio', points, mode: 'simple' };
+    const first = await jsonRequest('POST', '/v1/calibrations', body, idempotent(key));
+    const second = await jsonRequest('POST', '/v1/calibrations', body, idempotent(key));
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(second.body.profile.id).toBe(first.body.profile.id);
+    expect(second.body.revision.revision).toBe(1);
+    expect(second.body.revision.contentHash).toBe(first.body.revision.contentHash);
+
+    const listed = await jsonRequest('GET', '/v1/calibrations?limit=200');
+    expect(
+      listed.body.profiles.filter((p: { name: string }) => p.name === 'Idempotent studio')
+    ).toHaveLength(1);
+  });
+
+  it('replays an append instead of allocating another revision', async () => {
+    const created = await createProfile('Idempotent append');
+    const key = `append:${randomUUID()}`;
+    const body = {
+      points: points.map((p) =>
+        p.role === 'grey' ? { ...p, targetColor: { r: 141, g: 141, b: 141 } } : p
+      ),
+      mode: 'simple',
+    };
+
+    const first = await jsonRequest(
+      'POST',
+      `/v1/calibrations/${created.profileId}/revisions`,
+      body,
+      idempotent(key)
+    );
+    const second = await jsonRequest(
+      'POST',
+      `/v1/calibrations/${created.profileId}/revisions`,
+      body,
+      idempotent(key)
+    );
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(first.body.revision.revision).toBe(2);
+    expect(second.body.revision.revision).toBe(2);
+
+    const profile = await jsonRequest('GET', `/v1/calibrations/${created.profileId}`);
+    expect(profile.body.profile.revisionCount).toBe(2);
+    expect(profile.body.profile.latestRevision).toBe(2);
+  });
+
+  it('rejects a malformed Idempotency-Key', async () => {
+    const res = await jsonRequest(
+      'POST',
+      '/v1/calibrations',
+      { name: 'Bad key', points, mode: 'simple' },
+      { ...AUTH, 'Idempotency-Key': 'short' }
+    );
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe('INVALID_REQUEST');
+  });
+
+  it('reports readiness only after the store answers', async () => {
+    const res = await fetch(`${base}/ready`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string; backend: string };
+    expect(body.status).toBe('ready');
+    expect(body.backend).toBe('sqlite');
   });
 });

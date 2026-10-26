@@ -32,7 +32,8 @@ profiles for workflow use.
 - Tailwind CSS + shadcn/ui
 - TanStack Query
 - JSZip for bulk downloads
-- Node.js API (`api/`) with `node:sqlite`, worker-thread image jobs, `sharp`
+- Node.js API (`api/`) with PostgreSQL in deployment (`node:sqlite` for local
+  development), worker-thread image jobs, `sharp`
 
 ## Getting started
 
@@ -70,6 +71,9 @@ limits and the PostgreSQL production gate.
 - `npm run test:watch` - Run Vitest in watch mode
 - `npm run acceptance` - Real HTTP save → reopen → select → correct check
 - `npm run start:api` - Run the loopback calibration API
+- `npm run db:migrate` - Apply the checked-in PostgreSQL migrations (one-off)
+- `npm run db:verify` - Verify the deployed PostgreSQL schema without changing it
+- `npm run test:api:pg` - Run the storage contract against PostgreSQL (opt-in)
 
 ## Project structure
 
@@ -81,9 +85,14 @@ src/
   types/             Shared TypeScript types
 api/
   server.ts          HTTP routes, auth, body limits, protocol safety
-  store.ts           Durable immutable revision store (SQLite)
+  storeContract.ts   Storage interface shared by both backends
+  store.ts           SQLite dev store (immutable revisions)
+  pg/pgStore.ts      PostgreSQL adapter (pool, transactions, idempotency)
+  pg/migrate.ts      Transactional migrations + boot-time schema verification
+  migrations/        Checked-in SQL schema
   workerPool.ts      Worker isolation, queue, deadlines
   imagePipeline.ts/sharp decode → shared LUT → PNG
+Dockerfile           Stateless API image (pinned Node, PostgreSQL only)
 ```
 
 ## Colour and fidelity contract
@@ -102,9 +111,12 @@ api/
 
 ## Deployment notes
 
-The SPA is static; build it and serve `dist/`. The API is single-instance with a
-durable local store. External PostgreSQL placement is a documented migration
-gate, not implemented here. Four remaining `npm audit` moderate advisories are
+The SPA is static; build it and serve `dist/`. The API image is stateless and
+stores calibration data in a dedicated PostgreSQL database/role; the checked-in
+migration is applied as a separate controlled step and the API refuses to boot
+against an absent or mismatched schema. SQLite remains a local-development
+backend only. See [api/README.md](api/README.md) for environment variables,
+migration and TLS details. Four remaining `npm audit` moderate advisories are
 build-time Tailwind 3 packages; runtime dependencies are clear of high/critical
 advisories.
 
