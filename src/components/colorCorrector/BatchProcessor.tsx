@@ -1,14 +1,22 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { BatchImage, CalibrationPreset, ExportSettings, ProcessingProgress } from '@/types/colorCorrector';
+import {
+  BatchImage,
+  CalibrationSelection,
+  ExportSettings,
+  ProcessingProgress,
+} from '@/types/colorCorrector';
 import {
   loadImageToCanvas,
   applyColorCorrectionToImage,
   canvasToBlob,
-  calculateMatrix,
   extensionForFormat,
   formatFromMime,
-  isValidColorMatrix,
 } from '@/lib/colorCorrection';
+import {
+  hasStaleCompletedResults,
+  isProcessedResultStale,
+} from '@/lib/batchStaleness';
+import { destructiveRevisionReason } from '@/lib/presetStorage';
 import { DropZone } from './DropZone';
 import { ImageThumbnail } from './ImageThumbnail';
 import { Button } from '@/components/ui/button';
@@ -24,7 +32,7 @@ import { toast } from 'sonner';
 const MAX_BATCH_FILES = 100;
 
 interface BatchProcessorProps {
-  preset: CalibrationPreset | null;
+  selection: CalibrationSelection | null;
 }
 
 function revokeUrl(url: string | null | undefined) {
@@ -33,17 +41,7 @@ function revokeUrl(url: string | null | undefined) {
   }
 }
 
-function resolvePresetMatrix(preset: CalibrationPreset): CalibrationPreset['matrix'] {
-  if (isValidColorMatrix(preset.matrix)) {
-    return preset.matrix;
-  }
-  if (preset.points.length > 0) {
-    return calculateMatrix(preset.points, preset.mode);
-  }
-  return null;
-}
-
-export function BatchProcessor({ preset }: BatchProcessorProps) {
+export function BatchProcessor({ selection }: BatchProcessorProps) {
   const [images, setImages] = useState<BatchImage[]>([]);
   const [progress, setProgress] = useState<ProcessingProgress | null>(null);
   const [exportSettings, setExportSettings] = useState<ExportSettings>({
@@ -54,7 +52,7 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
   const imagesRef = useRef(images);
   imagesRef.current = images;
   const cancelRef = useRef(false);
-  const activePresetIdRef = useRef<string | null>(null);
+  const activeSelectionKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     return () => {
@@ -66,25 +64,22 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
     };
   }, []);
 
-  // Invalidate completed results when preset or encode settings change
+  // Invalidate completed results when the explicit revision or encode settings change
   useEffect(() => {
-    const presetId = preset?.id ?? null;
-    const presetChanged = activePresetIdRef.current !== null && activePresetIdRef.current !== presetId;
-    activePresetIdRef.current = presetId;
+    const selectionKey = selection
+      ? `${selection.presetId}@${selection.revision.revision}:${selection.revision.fingerprint}`
+      : null;
+    const selectionChanged =
+      activeSelectionKeyRef.current !== null && activeSelectionKeyRef.current !== selectionKey;
+    activeSelectionKeyRef.current = selectionKey;
 
     setImages((prev) => {
       let changed = false;
       const next = prev.map((img) => {
         if (img.status !== 'completed' || !img.processedWith) return img;
-
-        const stalePreset = presetChanged || img.processedWith.presetId !== (presetId ?? '');
-        const staleExport =
-          img.processedWith.format !== exportSettings.format ||
-          (exportSettings.format === 'jpeg' &&
-            Math.abs(img.processedWith.quality - exportSettings.quality) > 0.001);
-
-        if (!stalePreset && !staleExport) return img;
-
+        if (!selectionChanged && !isProcessedResultStale(img.processedWith, selection, exportSettings)) {
+          return img;
+        }
         changed = true;
         revokeUrl(img.correctedUrl);
         return {
@@ -97,7 +92,15 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
       });
       return changed ? next : prev;
     });
-  }, [preset?.id, exportSettings.format, exportSettings.quality]);
+  }, [
+    // The effect reads the full objects but only identity-relevant primitives
+    // should trigger an invalidation pass.
+    selection?.presetId,
+    selection?.revision.revision,
+    selection?.revision.fingerprint,
+    exportSettings.format,
+    exportSettings.quality,
+  ]);
 
   const handleFilesSelected = useCallback((files: File[]) => {
     const currentCount = imagesRef.current.length;
@@ -160,16 +163,20 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
   }, []);
 
   const processImages = useCallback(async (reprocessAll = false) => {
-    if (!preset) {
-      toast.error('Select a calibration preset first');
+    if (!selection) {
+      toast.error('Select a calibration profile and revision first');
       return;
     }
 
-    const matrix = resolvePresetMatrix(preset);
-    if (!matrix) {
-      toast.error('Preset has no usable calibration matrix');
+    const blocked = destructiveRevisionReason(selection.revision);
+    if (blocked) {
+      toast.error(
+        `This revision fails the colour safety guardrail (${blocked}) and was not applied. Choose or import a different revision.`
+      );
       return;
     }
+
+    const matrix = selection.revision.matrix;
 
     const snapshot = imagesRef.current;
     const toProcess = snapshot.filter(
@@ -228,7 +235,9 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
               correctedUrl,
               error: undefined,
               processedWith: {
-                presetId: preset.id,
+                presetId: selection.presetId,
+                revision: selection.revision.revision,
+                fingerprint: selection.revision.fingerprint,
                 format: exportSettings.format,
                 quality: exportSettings.quality,
               },
@@ -270,7 +279,7 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
     } else {
       toast.warning(`Processed ${successCount}, failed ${errorCount}`);
     }
-  }, [preset, exportSettings]);
+  }, [selection, exportSettings]);
 
   const downloadSingle = useCallback(
     async (image: BatchImage) => {
@@ -349,13 +358,7 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
   ).length;
   const isProcessing = progress !== null;
   const remainingSlots = Math.max(0, MAX_BATCH_FILES - images.length);
-  const hasStaleCompleted = images.some(
-    (img) =>
-      img.status === 'completed' &&
-      img.processedWith &&
-      (img.processedWith.presetId !== (preset?.id ?? '') ||
-        img.processedWith.format !== exportSettings.format)
-  );
+  const hasStaleCompleted = hasStaleCompletedResults(images, selection, exportSettings);
 
   return (
     <div className="space-y-6">
@@ -375,7 +378,8 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
               className="p-3 rounded-lg bg-warning/15 border border-warning/40 text-sm text-foreground"
             >
               <span className="font-medium text-warning">Out of date:</span>{' '}
-              Some results need reprocessing after preset or export changes.
+              Some results were produced with a different revision or export setting. Reprocess
+              before downloading.
             </div>
           )}
 
@@ -449,7 +453,7 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
               <Button
                 className="flex-1 sm:flex-none min-h-10"
                 onClick={() => processImages(false)}
-                disabled={!preset || pendingCount === 0 || isProcessing}
+                disabled={!selection || pendingCount === 0 || isProcessing}
               >
                 <Play className="w-4 h-4 mr-2" />
                 Process {pendingCount > 0 ? `(${pendingCount})` : ''}
@@ -474,8 +478,8 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
                     variant="secondary"
                     className="min-h-10"
                     onClick={() => processImages(true)}
-                    disabled={!preset}
-                    title="Reprocess all included images with current settings"
+                    disabled={!selection}
+                    title="Reprocess all included images with the selected revision"
                   >
                     <RotateCcw className="w-4 h-4 mr-2" />
                     Reprocess
@@ -526,13 +530,13 @@ export function BatchProcessor({ preset }: BatchProcessorProps) {
         </>
       )}
 
-      {!preset && images.length > 0 && (
+      {!selection && images.length > 0 && (
         <div
           role="status"
           className="p-4 rounded-lg bg-warning/15 border border-warning/40 text-center"
         >
           <p className="text-sm text-foreground">
-            Please create or select a calibration preset first to process images.
+            Select a saved calibration profile and an explicit revision before processing.
           </p>
         </div>
       )}

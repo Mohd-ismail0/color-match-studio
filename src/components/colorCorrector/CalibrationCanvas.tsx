@@ -5,7 +5,9 @@ import {
   nextAutoRole,
   defaultTargetForRole,
   defaultLabelForRole,
+  computeFittedSize,
 } from '@/lib/colorCorrection';
+import { IMAGE_LIMITS } from '@/lib/calibrationLimits';
 import { ColorPointMarker } from './ColorPointMarker';
 import { cn } from '@/lib/utils';
 
@@ -44,11 +46,19 @@ export function CalibrationCanvas({
       if (loadId !== loadIdRef.current) return;
       const canvas = canvasRef.current;
       if (canvas) {
-        canvas.width = img.naturalWidth || img.width;
-        canvas.height = img.naturalHeight || img.height;
+        // Cap the sampling surface (audit C10): a 12000x9000 upload must not
+        // allocate a 432 MB canvas before a single point is placed.
+        const fitted = computeFittedSize(
+          img.naturalWidth || img.width,
+          img.naturalHeight || img.height,
+          IMAGE_LIMITS.calibrationMaxEdge,
+          IMAGE_LIMITS.calibrationMaxPixels
+        );
+        canvas.width = fitted.width;
+        canvas.height = fitted.height;
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         if (ctx) {
-          ctx.drawImage(img, 0, 0);
+          ctx.drawImage(img, 0, 0, fitted.width, fitted.height);
         }
         onSamplingCanvasReady?.(canvas);
       }

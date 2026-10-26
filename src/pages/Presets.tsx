@@ -6,13 +6,32 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { CalibrationPreset } from '@/types/colorCorrector';
 import {
+  PresetStorageError,
   getAllPresets,
   deletePreset,
   exportPresetsToJson,
+  exportQuarantinedPresetsToJson,
+  getQuarantinedPresetCount,
+  getRawPresetStorage,
+  isPresetStorageCorrupt,
   importPresetsFromJson,
 } from '@/lib/presetStorage';
-import { Settings2, Search, BookMarked, Download, Upload } from 'lucide-react';
+import { Settings2, Search, BookMarked, Download, Upload, CloudUpload } from 'lucide-react';
 import { toast } from 'sonner';
+import { Label } from '@/components/ui/label';
+import { Card, CardContent } from '@/components/ui/card';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
+  CalibrationApiError,
+  createCalibrationProfile,
+} from '@/lib/calibrationApi';
+import { ALGORITHM_VERSION } from '@/lib/calibrationLimits';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -30,9 +49,27 @@ export default function Presets() {
   const [presets, setPresets] = useState<CalibrationPreset[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [apiBaseUrl, setApiBaseUrl] = useState(
+    () => sessionStorage.getItem('colorApiBaseUrl') || 'http://127.0.0.1:8081'
+  );
+  const [apiToken, setApiToken] = useState(() => sessionStorage.getItem('colorApiToken') || '');
+  const [publishPresetId, setPublishPresetId] = useState('');
+  const [publishRevision, setPublishRevision] = useState<number | null>(null);
+  const [publishName, setPublishName] = useState('');
+  const [publishing, setPublishing] = useState(false);
+  const [quarantinedCount, setQuarantinedCount] = useState(0);
+  const [storageCorrupt, setStorageCorrupt] = useState(false);
+
+  const refreshPresets = () => {
+    setPresets(getAllPresets());
+    setQuarantinedCount(getQuarantinedPresetCount());
+    setStorageCorrupt(isPresetStorageCorrupt());
+  };
 
   useEffect(() => {
     setPresets(getAllPresets());
+    setQuarantinedCount(getQuarantinedPresetCount());
+    setStorageCorrupt(isPresetStorageCorrupt());
   }, []);
 
   const filteredPresets = presets.filter((preset) =>
@@ -40,7 +77,8 @@ export default function Presets() {
   );
 
   const handleApply = (preset: CalibrationPreset) => {
-    navigate('/batch', { state: { preset } });
+    // The batch page requires an explicit revision; do not preselect one.
+    navigate('/batch', { state: { presetId: preset.id } });
   };
 
   const handleEdit = (preset: CalibrationPreset) => {
@@ -54,9 +92,47 @@ export default function Presets() {
   const confirmDelete = () => {
     if (deleteId) {
       deletePreset(deleteId);
-      setPresets(getAllPresets());
+      refreshPresets();
       toast.success('Preset deleted');
       setDeleteId(null);
+    }
+  };
+
+  const publishPreset = presets.find((p) => p.id === publishPresetId) ?? null;
+  const publishRevisionData =
+    publishPreset?.revisions?.find((r) => r.revision === publishRevision) ?? null;
+
+  const handlePublish = async () => {
+    if (!publishPreset || !publishRevisionData) {
+      toast.error('Choose a preset and an explicit revision to publish');
+      return;
+    }
+    if (publishRevisionData.algorithmVersion !== ALGORITHM_VERSION) {
+      toast.error(
+        `Revision ${publishRevisionData.revision} was produced by ${publishRevisionData.algorithmVersion}; re-save it with the current engine before publishing.`
+      );
+      return;
+    }
+    setPublishing(true);
+    try {
+      const result = await createCalibrationProfile(apiBaseUrl, apiToken, {
+        name: (publishName.trim() || publishPreset.name).slice(0, 120),
+        points: publishRevisionData.points,
+        mode: publishRevisionData.mode,
+        matrix: publishRevisionData.matrix,
+        algorithmVersion: publishRevisionData.algorithmVersion,
+      });
+      sessionStorage.setItem('colorApiBaseUrl', apiBaseUrl);
+      if (apiToken) sessionStorage.setItem('colorApiToken', apiToken);
+      toast.success(
+        `Published as profile ${result.profile.id} revision ${result.revision.revision}`
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof CalibrationApiError ? error.message : 'Failed to publish calibration'
+      );
+    } finally {
+      setPublishing(false);
     }
   };
 
@@ -72,11 +148,24 @@ export default function Presets() {
     toast.success('Presets exported');
   };
 
+  const handleExportUnreadable = () => {
+    const json = storageCorrupt
+      ? (getRawPresetStorage() ?? '')
+      : exportQuarantinedPresetsToJson();
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `colorfix-unreadable-presets-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handleImportFile = async (file: File) => {
     try {
       const text = await file.text();
       const { imported, skipped } = importPresetsFromJson(text);
-      setPresets(getAllPresets());
+      refreshPresets();
       if (imported === 0) {
         toast.error('No valid presets found in file');
         return;
@@ -86,8 +175,12 @@ export default function Presets() {
           skipped ? ` (${skipped} skipped)` : ''
         }`
       );
-    } catch {
-      toast.error('Failed to import presets — invalid JSON');
+    } catch (error) {
+      toast.error(
+        error instanceof PresetStorageError
+          ? error.message
+          : 'Failed to import presets — invalid JSON'
+      );
     }
   };
 
@@ -136,6 +229,110 @@ export default function Presets() {
         </div>
 
         {presets.length > 0 && (
+          <Card>
+            <CardContent className="space-y-3 pt-4">
+              <div className="flex items-center gap-2">
+                <CloudUpload className="w-4 h-4 text-muted-foreground" aria-hidden="true" />
+                <p className="text-sm font-medium">
+                  Publish an explicit revision to the API (creates a new profile)
+                </p>
+              </div>
+              <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                <div className="space-y-1 lg:col-span-2">
+                  <Label htmlFor="publish-base" className="text-xs text-muted-foreground">
+                    API base URL
+                  </Label>
+                  <Input
+                    id="publish-base"
+                    value={apiBaseUrl}
+                    onChange={(e) => setApiBaseUrl(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-1 lg:col-span-2">
+                  <Label htmlFor="publish-token" className="text-xs text-muted-foreground">
+                    Bearer token (this tab only)
+                  </Label>
+                  <Input
+                    id="publish-token"
+                    type="password"
+                    value={apiToken}
+                    onChange={(e) => setApiToken(e.target.value)}
+                    autoComplete="off"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="publish-name" className="text-xs text-muted-foreground">
+                    Remote name
+                  </Label>
+                  <Input
+                    id="publish-name"
+                    value={publishName}
+                    onChange={(e) => setPublishName(e.target.value)}
+                    placeholder="Default: preset name"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="publish-preset" className="text-xs text-muted-foreground">
+                    Preset
+                  </Label>
+                  <Select
+                    value={publishPresetId || undefined}
+                    onValueChange={(v) => {
+                      setPublishPresetId(v);
+                      setPublishRevision(null);
+                    }}
+                  >
+                    <SelectTrigger id="publish-preset">
+                      <SelectValue placeholder="Preset" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {presets.map((preset) => (
+                        <SelectItem key={preset.id} value={preset.id}>
+                          {preset.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="publish-revision" className="text-xs text-muted-foreground">
+                    Revision
+                  </Label>
+                  <Select
+                    value={publishRevision === null ? undefined : String(publishRevision)}
+                    onValueChange={(v) => setPublishRevision(Number(v))}
+                    disabled={!publishPreset}
+                  >
+                    <SelectTrigger id="publish-revision">
+                      <SelectValue placeholder="Revision" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(publishPreset?.revisions ?? [])
+                        .slice()
+                        .sort((a, b) => b.revision - a.revision)
+                        .map((revision) => (
+                          <SelectItem key={revision.revision} value={String(revision.revision)}>
+                            rev {revision.revision} • {revision.fingerprint.slice(0, 8)}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex items-end lg:col-span-1">
+                  <Button
+                    className="w-full"
+                    onClick={handlePublish}
+                    disabled={publishing || !publishRevisionData || !apiToken.trim()}
+                  >
+                    Publish
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {presets.length > 0 && (
           <div className="relative max-w-md w-full">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
             <Input
@@ -145,6 +342,28 @@ export default function Presets() {
               className="pl-10 min-h-10"
               aria-label="Search presets"
             />
+          </div>
+        )}
+
+        {(storageCorrupt || quarantinedCount > 0) && (
+          <div
+            role="alert"
+            className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm space-y-2"
+          >
+            <p className="font-medium">
+              {storageCorrupt
+                ? 'Saved preset data could not be read.'
+                : `${quarantinedCount} saved preset${quarantinedCount === 1 ? '' : 's'} could not be read.`}
+            </p>
+            <p className="text-muted-foreground">
+              {storageCorrupt
+                ? 'Nothing has been deleted, and saving is blocked until this is resolved. Download the raw value before resetting browser storage.'
+                : 'These records are kept exactly as stored and are not used for correction. Download them before repairing or resetting browser storage.'}
+            </p>
+            <Button variant="outline" size="sm" onClick={handleExportUnreadable}>
+              <Download className="w-4 h-4 mr-2" />
+              Download unreadable data
+            </Button>
           </div>
         )}
 

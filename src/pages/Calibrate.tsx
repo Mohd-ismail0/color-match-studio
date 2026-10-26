@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { ColorPoint, CalibrationPreset, ColorMatrix } from '@/types/colorCorrector';
+import { ColorPoint, CalibrationPreset, ColorMatrix, MatrixFitResult } from '@/types/colorCorrector';
 import {
   calculateMatrixDetailed,
   applyColorCorrectionToImage,
@@ -17,7 +17,13 @@ import {
   sampleColorFromCanvas,
   inferPointRole,
 } from '@/lib/colorCorrection';
-import { savePreset, generatePresetId } from '@/lib/presetStorage';
+import {
+  buildTransientPreset,
+  generatePresetId,
+  savePreset,
+} from '@/lib/presetStorage';
+import { ALGORITHM_VERSION } from '@/lib/calibrationLimits';
+import { revisionFingerprint } from '@/lib/matrixFingerprint';
 import {
   Save,
   Eye,
@@ -41,10 +47,12 @@ export default function Calibrate() {
   const [mode, setMode] = useState<'simple' | 'advanced'>('simple');
   const [matrix, setMatrix] = useState<ColorMatrix | null>(null);
   const [fitWarning, setFitWarning] = useState<string | null>(null);
+  const [fit, setFit] = useState<MatrixFitResult | null>(null);
   const [showPreview, setShowPreview] = useState(false);
   const [correctedUrl, setCorrectedUrl] = useState<string | null>(null);
   const [editingPreset, setEditingPreset] = useState<CalibrationPreset | null>(null);
   const imageUrlRef = useRef<string | null>(null);
+  const previewCanvasRef = useRef<{ file: File; canvas: HTMLCanvasElement } | null>(null);
   const preservePointsOnNextImageRef = useRef(false);
   const pointsRef = useRef(points);
   pointsRef.current = points;
@@ -80,6 +88,7 @@ export default function Calibrate() {
   useEffect(() => {
     if (points.length === 0) {
       setMatrix(null);
+      setFit(null);
       setFitWarning(null);
       setCorrectedUrl(null);
       return;
@@ -87,10 +96,8 @@ export default function Calibrate() {
 
     const result = calculateMatrixDetailed(points, mode);
     setMatrix(result.matrix);
+    setFit(result);
     setFitWarning(result.warning ?? null);
-    if (result.warning) {
-      // Soft notice — not an error toast every keystroke
-    }
   }, [points, mode]);
 
   useEffect(() => {
@@ -106,9 +113,14 @@ export default function Calibrate() {
 
     const generatePreview = async () => {
       try {
-        const canvas = await loadImageToCanvas(imageFile);
+        let cached = previewCanvasRef.current;
+        if (!cached || cached.file !== imageFile) {
+          const canvas = await loadImageToCanvas(imageFile);
+          cached = { file: imageFile, canvas };
+          previewCanvasRef.current = cached;
+        }
         if (cancelled) return;
-        const correctedCanvas = applyColorCorrectionToImage(canvas, matrix);
+        const correctedCanvas = applyColorCorrectionToImage(cached.canvas, matrix);
         const blob = await new Promise<Blob | null>((resolve) =>
           correctedCanvas.toBlob(resolve, 'image/jpeg', 0.9)
         );
@@ -126,9 +138,11 @@ export default function Calibrate() {
       }
     };
 
-    generatePreview();
+    // Debounce so dragging a point does not re-run a full-res pass per step.
+    const timer = window.setTimeout(generatePreview, 250);
     return () => {
       cancelled = true;
+      if (timer) window.clearTimeout(timer);
     };
   }, [matrix, imageFile, showPreview]);
 
@@ -177,6 +191,7 @@ export default function Calibrate() {
   const handleClearAll = useCallback(() => {
     setPoints([]);
     setMatrix(null);
+    setFit(null);
     setFitWarning(null);
     setCorrectedUrl(null);
   }, []);
@@ -190,6 +205,7 @@ export default function Calibrate() {
       URL.revokeObjectURL(imageUrlRef.current);
       imageUrlRef.current = null;
     }
+    previewCanvasRef.current = null;
     setImageUrl(null);
     setImageFile(null);
     setCorrectedUrl(null);
@@ -221,11 +237,13 @@ export default function Calibrate() {
     };
 
     try {
-      savePreset(preset);
-      setEditingPreset(preset);
-      toast.success(`Preset "${preset.name}" saved successfully!`);
-    } catch {
-      toast.error('Failed to save preset. Storage may be full.');
+      const saved = savePreset(preset);
+      setEditingPreset(saved);
+      toast.success(
+        `Preset "${saved.name}" saved as revision ${saved.currentRevision ?? 1}.`
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to save preset.');
     }
   }, [presetName, points, matrix, mode, editingPreset]);
 
@@ -235,17 +253,32 @@ export default function Calibrate() {
       return;
     }
 
-    const preset: CalibrationPreset = {
-      id: editingPreset?.id || generatePresetId(),
-      name: presetName.trim() || 'Unsaved Preset',
-      createdAt: editingPreset?.createdAt || Date.now(),
-      updatedAt: Date.now(),
+    // Always hand the batch page an explicit revision, never an implicit
+    // "latest". If the current points/matrix differ from the saved revision,
+    // use an in-memory revision instead of silently applying stale content.
+    const currentFingerprint = revisionFingerprint({
+      algorithmVersion: ALGORITHM_VERSION,
+      mode,
       points,
       matrix,
-      mode,
-    };
+    });
+    const savedRevision = editingPreset?.revisions?.find(
+      (r) => r.revision === editingPreset.currentRevision
+    );
+    const target =
+      editingPreset && savedRevision && savedRevision.fingerprint === currentFingerprint
+        ? editingPreset
+        : buildTransientPreset({
+            name: presetName.trim() || 'Unsaved Preset',
+            points,
+            matrix,
+            mode,
+          });
+    const revision = target.currentRevision ?? target.revisions?.[0]?.revision ?? 1;
 
-    navigate('/batch', { state: { preset, unsaved: !editingPreset } });
+    navigate('/batch', {
+      state: { preset: target, revision, unsaved: !editingPreset },
+    });
   }, [matrix, editingPreset, presetName, points, mode, navigate]);
 
   const modeHint =
@@ -367,6 +400,37 @@ export default function Calibrate() {
                   <p className="text-xs text-foreground mt-3 rounded-md bg-warning/15 border border-warning/40 p-2">
                     {fitWarning}
                   </p>
+                )}
+                {fit && fit.warnings.length > 1 && (
+                  <ul className="text-xs text-muted-foreground mt-2 space-y-1 list-disc pl-4">
+                    {fit.warnings.slice(1).map((notice, index) => (
+                      <li key={index}>{notice}</li>
+                    ))}
+                  </ul>
+                )}
+                {fit && (
+                  <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                    <dt>Chromatic patches</dt>
+                    <dd className="text-right">{fit.diagnostics.chromaticSamples}</dd>
+                    <dt>Cond. ratio</dt>
+                    <dd className="text-right">
+                      {fit.diagnostics.conditioningRatio === null
+                        ? 'n/a'
+                        : fit.diagnostics.conditioningRatio.toExponential(1)}
+                    </dd>
+                    <dt>Clipping (probe)</dt>
+                    <dd className="text-right">
+                      {(fit.diagnostics.clippingForecast * 100).toFixed(0)}%
+                    </dd>
+                    <dt>Fallback used</dt>
+                    <dd className="text-right">
+                      {fit.diagnostics.destructiveFallback
+                        ? 'yes (identity)'
+                        : fit.fellBackToSimple
+                          ? 'simple'
+                          : 'no'}
+                    </dd>
+                  </dl>
                 )}
               </CardContent>
             </Card>
