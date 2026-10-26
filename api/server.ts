@@ -1,12 +1,16 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import { IMAGE_LIMITS, SERVER_LIMITS } from '../src/lib/calibrationLimits';
+import { CALIBRATION_LIMITS, IMAGE_LIMITS, SERVER_LIMITS } from '../src/lib/calibrationLimits';
 import { assessMatrix, validateColorMatrix } from '../src/lib/matrixValidation';
 import {
   ApiError,
   errorBody,
 } from './errors';
-import { CalibrationStore, StoreError } from './store';
+import { CalibrationStore } from './store';
+import {
+  StoreError,
+  type CalibrationStoreAdapter,
+} from './storeContract';
 import { WorkerPool, PoolError } from './workerPool';
 import { ImageError } from './imagePipeline';
 import {
@@ -14,6 +18,7 @@ import {
   parseAppendRevision,
   parseCorrect,
   parseCreateCalibration,
+  parseIdempotencyKey,
 } from './schema';
 import {
   draftFromAppend,
@@ -24,7 +29,8 @@ import {
 
 export interface ColorApiOptions {
   dbPath?: string;
-  store?: CalibrationStore;
+  /** Durable store; PostgreSQL in deployment, SQLite for local development. */
+  store?: CalibrationStoreAdapter;
   workerCount?: number;
   queueLimit?: number;
   jobTimeoutMs?: number;
@@ -34,7 +40,7 @@ export interface ColorApiOptions {
 }
 
 export interface ColorApiServer extends Server {
-  store: CalibrationStore;
+  store: CalibrationStoreAdapter;
   pool: WorkerPool;
   shutdown: () => Promise<void>;
 }
@@ -254,8 +260,31 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
         sendJson(res, 200, {
           status: 'ok',
           uptimeMs: Date.now() - startedAt,
+          backend: store.kind,
           queue: pool.stats(),
         });
+        return;
+      }
+
+      // Readiness: proves the durable store answers, unlike /health which must
+      // stay responsive while image work is in flight.
+      if (req.method === 'GET' && (pathname === '/ready' || pathname === '/health/ready')) {
+        try {
+          await store.ping();
+          sendJson(res, 200, {
+            status: 'ready',
+            backend: store.kind,
+            uptimeMs: Date.now() - startedAt,
+          });
+        } catch (error) {
+          accessLog({
+            level: 'error',
+            event: 'store_unavailable',
+            requestId,
+            code: error instanceof StoreError ? error.code : 'INTERNAL_ERROR',
+          });
+          sendJson(res, 503, { status: 'unavailable', backend: store.kind });
+        }
         return;
       }
 
@@ -285,12 +314,13 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
       if (req.method === 'POST' && pathname === '/v1/calibrations') {
         const parsed = await readJsonBody(req, res, requestId);
         if (!parsed.ok) return;
-        if (store.countProfiles() >= 10_000) {
+        if ((await store.countProfiles()) >= CALIBRATION_LIMITS.maxProfilesPerStore) {
           throw new ApiError(429, 'PROFILE_LIMIT', 'Calibration profile limit reached');
         }
         const input = parseCreateCalibration(parsed.body);
         const draft = draftFromCreate(input);
-        const created = store.createProfile(input.name, draft);
+        const idempotencyKey = parseIdempotencyKey(req.headers['idempotency-key']);
+        const created = await store.createProfile(input.name, draft, { idempotencyKey });
         sendJson(
           res,
           201,
@@ -309,7 +339,7 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
         if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
           throw new ApiError(422, 'INVALID_REQUEST', 'limit must be an integer 1–200');
         }
-        const profiles = store.listProfiles(limit);
+        const profiles = await store.listProfiles(limit);
         sendJson(res, 200, { profiles });
         return;
       }
@@ -317,7 +347,7 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
       if (segments.length >= 3 && segments[1] === 'calibrations') {
         const profileId = segments[2];
         if (req.method === 'GET' && segments.length === 3) {
-          const profile = store.getProfile(profileId);
+          const profile = await store.getProfile(profileId);
           if (!profile) throw new ApiError(404, 'PROFILE_NOT_FOUND', 'Calibration profile not found');
           sendJson(res, 200, { profile });
           return;
@@ -328,7 +358,8 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
           if (!parsed.ok) return;
           const input = parseAppendRevision(parsed.body);
           const draft = draftFromAppend(input);
-          const revision = store.appendRevision(profileId, draft);
+          const idempotencyKey = parseIdempotencyKey(req.headers['idempotency-key']);
+          const revision = await store.appendRevision(profileId, draft, { idempotencyKey });
           sendJson(res, 201, { revision: serializeRevision(revision) });
           return;
         }
@@ -346,7 +377,7 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
           if (!Number.isSafeInteger(revisionNumber)) {
             throw new ApiError(422, 'INVALID_REQUEST', 'revision is outside the supported range');
           }
-          const revision = store.getRevision(profileId, revisionNumber);
+          const revision = await store.getRevision(profileId, revisionNumber);
           if (!revision) {
             throw new ApiError(404, 'REVISION_NOT_FOUND', 'Calibration revision not found');
           }
@@ -369,7 +400,10 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
         let matrix;
         let calibrationRef: { profileId: string; revision: number; hash: string } | undefined;
         if (input.calibration) {
-          const stored = store.getRevision(input.calibration.profileId, input.calibration.revision);
+          const stored = await store.getRevision(
+            input.calibration.profileId,
+            input.calibration.revision
+          );
           if (!stored) {
             throw new ApiError(404, 'REVISION_NOT_FOUND', 'Calibration revision not found');
           }
@@ -458,7 +492,14 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
       message = error.message;
       headers = { ...error.headers };
     } else if (error instanceof StoreError) {
-      status = error.code === 'NOT_FOUND' ? 404 : error.code === 'LIMIT' ? 409 : 500;
+      status =
+        error.code === 'NOT_FOUND'
+          ? 404
+          : error.code === 'LIMIT' || error.code === 'CONFLICT'
+            ? 409
+            : error.code === 'UNAVAILABLE'
+              ? 503
+              : 500;
       code = `STORE_${error.code}`;
       message = error.message;
     } else if (error instanceof PoolError && error.remoteCode) {
@@ -534,7 +575,7 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
     shuttingDown = true;
     await pool.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    store.close();
+    await store.close();
   };
 
   return apiServer;

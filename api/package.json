@@ -1,0 +1,16 @@
+{
+  "name": "color-match-studio-api",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Runtime dependencies for the Color Match Studio calibration API container.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "pg": "8.23.1",
+    "sharp": "0.35.5",
+    "tsx": "4.23.15"
+  }
+}

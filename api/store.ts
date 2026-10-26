@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type {
@@ -11,57 +12,29 @@ import {
   CALIBRATION_LIMITS,
   DEFAULT_DB_RELATIVE_PATH,
 } from '../src/lib/calibrationLimits';
+import {
+  StoreError,
+  clampProfileLimit,
+  scopeIdempotencyKey,
+  type CalibrationStoreAdapter,
+  type ProfileDetail,
+  type ProfileSummary,
+  type RevisionDraft,
+  type RevisionSummary,
+  type StoreWriteOptions,
+  type StoredRevision,
+} from './storeContract';
 
-export interface RevisionDraft {
-  points: ColorPoint[];
-  matrix: ColorMatrix;
-  mode: 'simple' | 'advanced';
-  algorithmVersion: string;
-  fingerprint: string;
-  contentHash: string;
-  provenance: CalibrationProvenance;
-  meanResidual: number;
-}
-
-export interface StoredRevision extends RevisionDraft {
-  profileId: string;
-  revision: number;
-  createdAt: number;
-}
-
-export interface RevisionSummary {
-  revision: number;
-  createdAt: number;
-  mode: 'simple' | 'advanced';
-  algorithmVersion: string;
-  fingerprint: string;
-  contentHash: string;
-  meanResidual: number;
-}
-
-export interface ProfileSummary {
-  id: string;
-  name: string;
-  createdAt: number;
-  updatedAt: number;
-  /** Highest stored revision number; never used as an implicit selection. */
-  latestRevision: number | null;
-  revisionCount: number;
-}
-
-export interface ProfileDetail extends ProfileSummary {
-  revisions: RevisionSummary[];
-}
-
-export class StoreError extends Error {
-  code: 'NOT_FOUND' | 'LIMIT' | 'CONFLICT' | 'INTEGRITY';
-
-  constructor(code: StoreError['code'], message: string) {
-    super(message);
-    this.name = 'StoreError';
-    this.code = code;
-  }
-}
+export {
+  StoreError,
+  type CalibrationStoreAdapter,
+  type ProfileDetail,
+  type ProfileSummary,
+  type RevisionDraft,
+  type RevisionSummary,
+  type StoreWriteOptions,
+  type StoredRevision,
+} from './storeContract';
 
 interface RevisionRow {
   profile_id: string;
@@ -119,8 +92,21 @@ export function resolveDbPath(explicit?: string): string {
   return absolute;
 }
 
-export class CalibrationStore {
+export function newProfileId(now = Date.now()): string {
+  return `cal_${now.toString(36)}_${randomBytes(5).toString('hex')}`;
+}
+
+/**
+ * SQLite adapter for local development and single-process tests.
+ *
+ * Production deployments use the PostgreSQL adapter (`api/pg/pgStore.ts`);
+ * SQLite is intentionally not the Coolify topology. The synchronous
+ * `node:sqlite` calls are wrapped in the shared asynchronous contract.
+ */
+export class CalibrationStore implements CalibrationStoreAdapter {
   private db: DatabaseSync;
+  private closed = false;
+  readonly kind = 'sqlite' as const;
   readonly path: string;
 
   constructor(dbPath?: string) {
@@ -152,6 +138,13 @@ export class CalibrationStore {
         PRIMARY KEY (profile_id, revision)
       ) STRICT;
 
+      CREATE TABLE IF NOT EXISTS idempotency_keys (
+        key TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE RESTRICT,
+        revision INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      ) STRICT;
+
       CREATE TRIGGER IF NOT EXISTS revisions_immutable_update
       BEFORE UPDATE ON revisions
       BEGIN
@@ -173,7 +166,16 @@ export class CalibrationStore {
     }
   }
 
+  get description(): string {
+    return this.path;
+  }
+
+  private assertOpen(): void {
+    if (this.closed) throw new StoreError('UNAVAILABLE', 'Calibration store is closed');
+  }
+
   private transaction<T>(fn: () => T): T {
+    this.assertOpen();
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const result = fn();
@@ -189,47 +191,133 @@ export class CalibrationStore {
     }
   }
 
-  createProfile(name: string, draft: RevisionDraft): { profile: ProfileSummary; revision: StoredRevision } {
-    const now = Date.now();
-    const id = `cal_${now.toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-    return this.transaction(() => {
-      this.db
-        .prepare('INSERT INTO profiles (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
-        .run(id, name, now, now);
-      const revision = this.insertRevision(id, 1, draft, now);
-      return {
-        profile: {
-          id,
-          name,
-          createdAt: now,
-          updatedAt: now,
-          latestRevision: 1,
-          revisionCount: 1,
-        },
-        revision,
-      };
-    });
+  private profileSummary(id: string): ProfileSummary {
+    const row = this.db
+      .prepare(
+        `SELECT p.id, p.name, p.created_at, p.updated_at,
+                MAX(r.revision) AS latest_revision, COUNT(r.revision) AS revision_count
+         FROM profiles p LEFT JOIN revisions r ON r.profile_id = p.id
+         WHERE p.id = ? GROUP BY p.id`
+      )
+      .get(id) as unknown as ProfileRow | undefined;
+    if (!row) throw new StoreError('NOT_FOUND', 'Calibration profile not found');
+    return {
+      id: row.id,
+      name: row.name,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      latestRevision: row.latest_revision ?? null,
+      revisionCount: row.revision_count,
+    };
   }
 
-  appendRevision(profileId: string, draft: RevisionDraft): StoredRevision {
-    return this.transaction(() => {
-      const profile = this.db.prepare('SELECT id FROM profiles WHERE id = ?').get(profileId) as
-        | { id: string }
-        | undefined;
-      if (!profile) throw new StoreError('NOT_FOUND', 'Calibration profile not found');
+  private lookupIdempotency(
+    scopeKey: string
+  ): { profileId: string; revision: number } | null {
+    const row = this.db
+      .prepare('SELECT profile_id, revision FROM idempotency_keys WHERE key = ?')
+      .get(scopeKey) as { profile_id: string; revision: number } | undefined;
+    return row ? { profileId: row.profile_id, revision: row.revision } : null;
+  }
 
-      const row = this.db
-        .prepare('SELECT MAX(revision) AS max_revision, COUNT(*) AS count FROM revisions WHERE profile_id = ?')
-        .get(profileId) as { max_revision: number | null; count: number };
-      if (row.count >= CALIBRATION_LIMITS.maxRevisionsPerProfile) {
-        throw new StoreError('LIMIT', 'Revision limit reached for this profile');
-      }
-      const next = (row.max_revision ?? 0) + 1;
-      const now = Date.now();
-      const revision = this.insertRevision(profileId, next, draft, now);
-      this.db.prepare('UPDATE profiles SET updated_at = ? WHERE id = ?').run(now, profileId);
-      return revision;
-    });
+  private recordIdempotency(
+    scopeKey: string,
+    profileId: string,
+    revision: number,
+    now: number
+  ): void {
+    this.db
+      .prepare(
+        'INSERT INTO idempotency_keys (key, profile_id, revision, created_at) VALUES (?, ?, ?, ?)'
+      )
+      .run(scopeKey, profileId, revision, now);
+  }
+
+  async createProfile(
+    name: string,
+    draft: RevisionDraft,
+    options?: StoreWriteOptions
+  ): Promise<{ profile: ProfileSummary; revision: StoredRevision }> {
+    const now = Date.now();
+    return this.transaction(() => {
+        const scopeKey = options?.idempotencyKey
+          ? scopeIdempotencyKey('create', options.idempotencyKey)
+          : null;
+        if (scopeKey) {
+          const replay = this.lookupIdempotency(scopeKey);
+          if (replay) {
+            const revision = this.getRevisionSync(replay.profileId, replay.revision);
+            if (!revision) {
+              throw new StoreError('INTEGRITY', 'Idempotent create points at a missing revision');
+            }
+            return { profile: this.profileSummary(replay.profileId), revision };
+          }
+        }
+
+        const id = newProfileId(now);
+        this.db
+          .prepare('INSERT INTO profiles (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)')
+          .run(id, name, now, now);
+        const revision = this.insertRevision(id, 1, draft, now);
+        if (scopeKey) this.recordIdempotency(scopeKey, id, 1, now);
+        return {
+          profile: {
+            id,
+            name,
+            createdAt: now,
+            updatedAt: now,
+            latestRevision: 1,
+            revisionCount: 1,
+          },
+          revision,
+        };
+      });
+  }
+
+  async appendRevision(
+    profileId: string,
+    draft: RevisionDraft,
+    options?: StoreWriteOptions
+  ): Promise<StoredRevision> {
+    return this.transaction(() => {
+        const profile = this.db.prepare('SELECT id FROM profiles WHERE id = ?').get(profileId) as
+          | { id: string }
+          | undefined;
+        if (!profile) throw new StoreError('NOT_FOUND', 'Calibration profile not found');
+
+        const scopeKey = options?.idempotencyKey
+          ? scopeIdempotencyKey(`append:${profileId}`, options.idempotencyKey)
+          : null;
+        if (scopeKey) {
+          const replay = this.lookupIdempotency(scopeKey);
+          if (replay) {
+            if (replay.profileId !== profileId) {
+              throw new StoreError(
+                'INTEGRITY',
+                'Idempotency key is bound to a different calibration profile'
+              );
+            }
+            const revision = this.getRevisionSync(profileId, replay.revision);
+            if (!revision) {
+              throw new StoreError('INTEGRITY', 'Idempotent append points at a missing revision');
+            }
+            return revision;
+          }
+        }
+
+        const row = this.db
+          .prepare('SELECT MAX(revision) AS max_revision, COUNT(*) AS count FROM revisions WHERE profile_id = ?')
+          .get(profileId) as { max_revision: number | null; count: number };
+        if (row.count >= CALIBRATION_LIMITS.maxRevisionsPerProfile) {
+          throw new StoreError('LIMIT', 'Revision limit reached for this profile');
+        }
+        const next = (row.max_revision ?? 0) + 1;
+        const now = Date.now();
+        const revision = this.insertRevision(profileId, next, draft, now);
+        this.db.prepare('UPDATE profiles SET updated_at = ? WHERE id = ?').run(now, profileId);
+        if (scopeKey) this.recordIdempotency(scopeKey, profileId, next, now);
+        return revision;
+      });
   }
 
   private insertRevision(
@@ -268,7 +356,8 @@ export class CalibrationStore {
     return { ...draft, provenance, profileId, revision, createdAt };
   }
 
-  listProfiles(limit = 50): ProfileSummary[] {
+  async listProfiles(limit = 50): Promise<ProfileSummary[]> {
+    this.assertOpen();
     const rows = this.db
       .prepare(
         `SELECT p.id, p.name, p.created_at, p.updated_at,
@@ -279,7 +368,7 @@ export class CalibrationStore {
          ORDER BY p.updated_at DESC
          LIMIT ?`
       )
-      .all(Math.max(1, Math.min(500, limit))) as unknown as ProfileRow[];
+      .all(clampProfileLimit(limit)) as unknown as ProfileRow[];
     return rows.map((row) => ({
       id: row.id,
       name: row.name,
@@ -290,7 +379,8 @@ export class CalibrationStore {
     }));
   }
 
-  getProfile(id: string): ProfileDetail | null {
+  async getProfile(id: string): Promise<ProfileDetail | null> {
+    this.assertOpen();
     const row = this.db
       .prepare(
         `SELECT p.id, p.name, p.created_at, p.updated_at,
@@ -333,8 +423,7 @@ export class CalibrationStore {
     };
   }
 
-  /** Explicit revision lookup; no "latest" fallback exists by design. */
-  getRevision(profileId: string, revision: number): StoredRevision | null {
+  private getRevisionSync(profileId: string, revision: number): StoredRevision | null {
     const row = this.db
       .prepare('SELECT * FROM revisions WHERE profile_id = ? AND revision = ?')
       .get(profileId, revision) as unknown as RevisionRow | undefined;
@@ -357,14 +446,27 @@ export class CalibrationStore {
     };
   }
 
-  countProfiles(): number {
+  async getRevision(profileId: string, revision: number): Promise<StoredRevision | null> {
+    this.assertOpen();
+    return this.getRevisionSync(profileId, revision);
+  }
+
+  async countProfiles(): Promise<number> {
+    this.assertOpen();
     const row = this.db.prepare('SELECT COUNT(*) AS count FROM profiles').get() as {
       count: number;
     };
     return row.count;
   }
 
-  close(): void {
+  async ping(): Promise<void> {
+    this.assertOpen();
+    this.db.prepare('SELECT 1').get();
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
     this.db.close();
   }
 }

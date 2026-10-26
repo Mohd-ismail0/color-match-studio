@@ -15,8 +15,11 @@
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.app.json && tsc -p tsconfig.api.json",
     "test:api": "vitest run api",
+    "test:api:pg": "vitest run api/pg",
     "acceptance": "tsx api/acceptance.ts",
     "start:api": "tsx api/main.ts",
+    "db:verify": "tsx api/pg/migrate.ts --verify",
+    "db:migrate": "tsx api/pg/migrate.ts --apply",
     "audit:prod": "npm audit --omit=dev"
   },
   "dependencies": {
@@ -39,6 +42,7 @@
     "jszip": "^3.10.1",
     "lucide-react": "^0.462.0",
     "next-themes": "^0.3.0",
+    "pg": "^8.23.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^7.18.4",
@@ -53,6 +57,7 @@
     "@testing-library/jest-dom": "^6.6.0",
     "@testing-library/react": "^16.0.0",
     "@types/node": "^22.16.5",
+    "@types/pg": "^8.23.1",
     "@types/react": "^18.3.23",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react-swc": "^4.3.3",

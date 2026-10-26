@@ -1,6 +1,7 @@
 import type { ColorMatrix, ColorPoint, ColorPointRole } from '../src/types/colorCorrector';
 import { CALIBRATION_LIMITS, IMAGE_LIMITS, MATRIX_LIMITS } from '../src/lib/calibrationLimits';
 import { ApiError } from './errors';
+import { IDEMPOTENCY_KEY_PATTERN } from './storeContract';
 
 export interface CreateCalibrationInput {
   name: string;
@@ -178,6 +179,21 @@ export function parseAlgorithmVersion(value: unknown): string | undefined {
     invalid('algorithmVersion must be a string of at most 32 characters');
   }
   return value;
+}
+
+/**
+ * Optional `Idempotency-Key` header. Replaying a create/append with the same
+ * key returns the originally stored revision instead of adding a new one.
+ */
+export function parseIdempotencyKey(value: string | string[] | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const raw = Array.isArray(value) ? value[0] : value;
+  const key = raw?.trim();
+  if (!key) invalid('Idempotency-Key must not be empty');
+  if (!IDEMPOTENCY_KEY_PATTERN.test(key)) {
+    invalid('Idempotency-Key must be 8–200 characters of A–Z, a–z, 0–9, ".", "_", ":" or "-"');
+  }
+  return key;
 }
 
 export function parseCreateCalibration(body: unknown): CreateCalibrationInput {
