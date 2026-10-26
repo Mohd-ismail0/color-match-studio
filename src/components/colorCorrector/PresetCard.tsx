@@ -50,7 +50,9 @@ export function PresetCard({ preset, onApply, onEdit, onDelete }: PresetCardProp
         </div>
 
         <p className="text-xs text-muted-foreground">
-          Updated {formatDistanceToNow(preset.updatedAt, { addSuffix: true })}
+          {preset.revisions?.length ?? 0} revision
+          {(preset.revisions?.length ?? 0) === 1 ? '' : 's'} • updated{' '}
+          {formatDistanceToNow(preset.updatedAt, { addSuffix: true })}
         </p>
 
         <div className="flex items-center gap-2 pt-1">

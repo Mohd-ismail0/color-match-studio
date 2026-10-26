@@ -4,7 +4,25 @@ import type {
   ColorMatrix,
   ColorPointRole,
   MatrixFitResult,
+  FitDiagnostics,
 } from '@/types/colorCorrector';
+import {
+  ALGORITHM_VERSION,
+  FIT_THRESHOLDS,
+  IMAGE_LIMITS,
+} from './calibrationLimits';
+import {
+  applyMatrixToRgba8,
+  clampChannel,
+  encodeLinear8,
+  linearToSrgb,
+  rgbToLinear,
+  srgbToLinear,
+} from './colorMath';
+import { assessMatrix, isValidColorMatrix, validateColorMatrix } from './matrixValidation';
+
+export { clampChannel, linearToSrgb, rgbToLinear, srgbToLinear, isValidColorMatrix };
+export { validateColorMatrix };
 
 const IDENTITY_MATRIX: ColorMatrix = {
   matrix: [
@@ -16,7 +34,7 @@ const IDENTITY_MATRIX: ColorMatrix = {
 };
 
 /** Longest edge cap to avoid tab OOM on huge camera files */
-export const MAX_IMAGE_DIMENSION = 8192;
+export const MAX_IMAGE_DIMENSION = IMAGE_LIMITS.maxDimension;
 
 /** Advanced fit rejected when mean residual exceeds this (8-bit DN) */
 const MAX_MEAN_RESIDUAL = 18;
@@ -54,38 +72,17 @@ export function rgbToHex(rgb: RGB): string {
   return `#${toHex(rgb.r)}${toHex(rgb.g)}${toHex(rgb.b)}`;
 }
 
-export function clampChannel(value: number): number {
-  return Math.max(0, Math.min(255, Math.round(value)));
-}
-
-/** sRGB (0–255) → linear (0–1) */
-export function srgbToLinear(channel: number): number {
-  const c = Math.max(0, Math.min(255, channel)) / 255;
-  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-}
-
-/** linear (0–1) → sRGB (0–255 float, unclamped before round) */
-export function linearToSrgb(linear: number): number {
-  const c = Math.max(0, linear);
-  const srgb = c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
-  return srgb * 255;
-}
-
-export function rgbToLinear(rgb: RGB): RGB {
-  return {
-    r: srgbToLinear(rgb.r),
-    g: srgbToLinear(rgb.g),
-    b: srgbToLinear(rgb.b),
-  };
-}
-
+/**
+ * Explicit roles always win — including `custom`, which must be able to
+ * override an exact label such as "White" (audit C14).
+ */
 export function inferPointRole(label: string, explicit?: ColorPointRole): ColorPointRole {
-  if (explicit && explicit !== 'custom') return explicit;
+  if (explicit) return explicit;
   const normalized = label.trim().toLowerCase();
   if (normalized === 'white') return 'white';
   if (normalized === 'grey' || normalized === 'gray') return 'grey';
   if (normalized === 'black') return 'black';
-  return explicit ?? 'custom';
+  return 'custom';
 }
 
 export function defaultTargetForRole(role: ColorPointRole, sampled: RGB): RGB {
@@ -110,8 +107,56 @@ export function nextAutoRole(points: ColorPoint[]): ColorPointRole {
   return 'custom';
 }
 
-function findByRole(points: ColorPoint[], role: ColorPointRole): ColorPoint | undefined {
-  return points.find((p) => inferPointRole(p.label, p.role) === role);
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+/**
+ * Duplicate role points are collapsed to the per-channel median of their
+ * samples and targets instead of silently using the first point (audit C15).
+ */
+function resolveRolePoint(points: ColorPoint[], role: ColorPointRole): ColorPoint | undefined {
+  const matches = points.filter((p) => inferPointRole(p.label, p.role) === role);
+  if (matches.length === 0) return undefined;
+  if (matches.length === 1) return matches[0];
+  return {
+    ...matches[0],
+    x: median(matches.map((p) => p.x)),
+    y: median(matches.map((p) => p.y)),
+    sampledColor: {
+      r: median(matches.map((p) => p.sampledColor.r)),
+      g: median(matches.map((p) => p.sampledColor.g)),
+      b: median(matches.map((p) => p.sampledColor.b)),
+    },
+    targetColor: {
+      r: median(matches.map((p) => p.targetColor.r)),
+      g: median(matches.map((p) => p.targetColor.g)),
+      b: median(matches.map((p) => p.targetColor.b)),
+    },
+  };
+}
+
+function duplicateRoles(points: ColorPoint[]): ColorPointRole[] {
+  const counts = new Map<ColorPointRole, number>();
+  for (const p of points) {
+    const role = inferPointRole(p.label, p.role);
+    counts.set(role, (counts.get(role) ?? 0) + 1);
+  }
+  return (['white', 'grey', 'black'] as ColorPointRole[]).filter((role) => (counts.get(role) ?? 0) > 1);
+}
+
+function chromaOf(rgb: RGB): number {
+  return Math.max(rgb.r, rgb.g, rgb.b) - Math.min(rgb.r, rgb.g, rgb.b);
+}
+
+function countChromaticSamples(points: ColorPoint[]): number {
+  return points.filter((p) => chromaOf(p.sampledColor) >= FIT_THRESHOLDS.chromaticChroma).length;
+}
+
+function finiteRgb(rgb: RGB): boolean {
+  return Number.isFinite(rgb.r) && Number.isFinite(rgb.g) && Number.isFinite(rgb.b);
 }
 
 export function sampleColorFromCanvas(
@@ -226,6 +271,46 @@ function fitDiagonalAffine(points: ColorPoint[]): { scales: RGB; offsets: RGB } 
   return { scales, offsets };
 }
 
+function toMatrix(scales: RGB, offsets: RGB): ColorMatrix {
+  return {
+    matrix: [
+      [scales.r, 0, 0],
+      [0, scales.g, 0],
+      [0, 0, scales.b],
+    ],
+    offset: { ...offsets },
+  };
+}
+
+function identityWithDiagnostics(
+  points: ColorPoint[],
+  mode: 'simple' | 'advanced',
+  warnings: string[],
+  extra: Partial<FitDiagnostics> = {}
+): MatrixFitResult {
+  const matrix = cloneIdentityMatrix();
+  return {
+    matrix,
+    meanResidual: meanAbsoluteResidual(points, matrix),
+    fellBackToSimple: false,
+    warning: warnings[0],
+    warnings,
+    diagnostics: {
+      mode,
+      algorithmVersion: ALGORITHM_VERSION,
+      sampleCount: points.length,
+      chromaticSamples: countChromaticSamples(points),
+      conditioningRatio: null,
+      minAnchorSeparation: null,
+      clippingForecast: 0,
+      saturationRetention: 1,
+      duplicateRoles: duplicateRoles(points),
+      destructiveFallback: true,
+      ...extra,
+    },
+  };
+}
+
 /**
  * Diagonal affine correction using white / grey / black reference points.
  * Fits in linear sRGB so neutrals and exposure behave more predictably.
@@ -236,61 +321,147 @@ function fitDiagonalAffine(points: ColorPoint[]): { scales: RGB; offsets: RGB } 
  * - White + Grey → white scale (preserves white lock; grey is for advanced mode)
  * - Multiple role points without both ends → diagonal least squares
  */
-export function calculateSimpleMatrix(points: ColorPoint[]): ColorMatrix {
+export function calculateSimpleMatrixDetailed(points: ColorPoint[]): MatrixFitResult {
   if (points.length === 0) {
-    return cloneIdentityMatrix();
+    return {
+      matrix: cloneIdentityMatrix(),
+      meanResidual: 0,
+      fellBackToSimple: false,
+      warnings: [],
+      diagnostics: {
+        mode: 'simple',
+        algorithmVersion: ALGORITHM_VERSION,
+        sampleCount: 0,
+        chromaticSamples: 0,
+        conditioningRatio: null,
+        minAnchorSeparation: null,
+        clippingForecast: 0,
+        saturationRetention: 1,
+        duplicateRoles: [],
+        destructiveFallback: false,
+      },
+    };
   }
 
-  const whitePoint = findByRole(points, 'white');
-  const greyPoint = findByRole(points, 'grey');
-  const blackPoint = findByRole(points, 'black');
+  const warnings: string[] = [];
+  const duplicates = duplicateRoles(points);
+  if (duplicates.length > 0) {
+    warnings.push(
+      `Duplicate ${duplicates.join('/')} points found; their samples were merged by median.`
+    );
+  }
+  if (points.some((p) => !finiteRgb(p.sampledColor) || !finiteRgb(p.targetColor))) {
+    return identityWithDiagnostics(points, 'simple', ['Calibration point colours are not finite.']);
+  }
+
+  const whitePoint = resolveRolePoint(points, 'white');
+  const greyPoint = resolveRolePoint(points, 'grey');
+  const blackPoint = resolveRolePoint(points, 'black');
+
+  let matrix: ColorMatrix;
+  let minAnchorSeparation: number | null = null;
 
   if (whitePoint && blackPoint) {
     // Exact black→white linear stretch in linear light — locks the range
     const scales = { r: 1, g: 1, b: 1 };
     const offsets = { r: 0, g: 0, b: 0 };
+    let inverted = false;
+    let lowContrast = false;
+
     (['r', 'g', 'b'] as const).forEach((channel) => {
       const sampleLow = rgbToLinear(blackPoint.sampledColor)[channel];
       const sampleHigh = rgbToLinear(whitePoint.sampledColor)[channel];
       const targetLow = rgbToLinear(blackPoint.targetColor)[channel];
       const targetHigh = rgbToLinear(whitePoint.targetColor)[channel];
       const delta = sampleHigh - sampleLow;
-      if (Math.abs(delta) < 1e-9) {
+
+      if (minAnchorSeparation === null || delta < minAnchorSeparation) {
+        minAnchorSeparation = delta;
+      }
+
+      if (delta <= 0) {
+        inverted = true;
         scales[channel] = 1;
-        offsets[channel] = targetLow - sampleLow;
+        offsets[channel] = 0;
+      } else if (delta < FIT_THRESHOLDS.minAnchorSeparationLinear) {
+        lowContrast = true;
+        scales[channel] = (targetHigh - targetLow) / delta;
+        offsets[channel] = targetLow - sampleLow * scales[channel];
       } else {
         scales[channel] = (targetHigh - targetLow) / delta;
         offsets[channel] = targetLow - sampleLow * scales[channel];
       }
     });
-    return {
-      matrix: [
-        [scales.r, 0, 0],
-        [0, scales.g, 0],
-        [0, 0, scales.b],
-      ],
-      offset: offsets,
-    };
+
+    if (inverted) {
+      warnings.push(
+        'The Black anchor is brighter than the White anchor on at least one channel; correction was disabled.'
+      );
+      return identityWithDiagnostics(points, 'simple', warnings, { minAnchorSeparation });
+    }
+    if (lowContrast) {
+      warnings.push(
+        'Black and White samples are very close (<2% linear). Corrections will amplify noise and may clip; use a cleaner chart shot.'
+      );
+    }
+    matrix = toMatrix(scales, offsets);
+  } else {
+    const fitPoints = [whitePoint, greyPoint, blackPoint].filter(
+      (p): p is ColorPoint => !!p
+    );
+    if (fitPoints.length === 0 && points.length === 1) {
+      warnings.push('Only one calibration point: correction is a per-channel scale with no offset.');
+    }
+    const { scales, offsets } = fitDiagonalAffine(
+      fitPoints.length > 0 ? fitPoints : [points[0]]
+    );
+    matrix = toMatrix(scales, offsets);
   }
 
-  const fitPoints = [whitePoint, greyPoint, blackPoint].filter(
-    (p): p is ColorPoint => !!p
-  );
-  const { scales, offsets } = fitDiagonalAffine(
-    fitPoints.length > 0 ? fitPoints : [points[0]]
-  );
+  const assessment = assessMatrix(matrix);
+  if (assessment.destructive) {
+    warnings.push(
+      `Calibration would destroy image data (${assessment.reasons.join('; ')}). An uncorrected identity matrix is used instead.`
+    );
+    return identityWithDiagnostics(points, 'simple', warnings, {
+      minAnchorSeparation,
+      clippingForecast: assessment.clippingFraction,
+      saturationRetention: assessment.saturationRetention,
+    });
+  }
 
+  if (assessment.clippingFraction > FIT_THRESHOLDS.clipWarnFraction) {
+    warnings.push(
+      `This calibration clips about ${(assessment.clippingFraction * 100).toFixed(0)}% of typical colour channels; check the reference shot exposure.`
+    );
+  }
+  const minLinear = minAnchorSeparation;
   return {
-    matrix: [
-      [scales.r, 0, 0],
-      [0, scales.g, 0],
-      [0, 0, scales.b],
-    ],
-    offset: offsets,
+    matrix,
+    meanResidual: meanAbsoluteResidual(points, matrix),
+    fellBackToSimple: false,
+    warning: warnings[0],
+    warnings,
+    diagnostics: {
+      mode: 'simple',
+      algorithmVersion: ALGORITHM_VERSION,
+      sampleCount: points.length,
+      chromaticSamples: countChromaticSamples(points),
+      conditioningRatio: null,
+      minAnchorSeparation: minLinear,
+      clippingForecast: assessment.clippingFraction,
+      saturationRetention: assessment.saturationRetention,
+      duplicateRoles: duplicates,
+      destructiveFallback: false,
+    },
   };
 }
 
-function applyMatrixLinear(colorLinear: RGB, matrix: ColorMatrix): RGB {
+export function calculateSimpleMatrix(points: ColorPoint[]): ColorMatrix {
+  return calculateSimpleMatrixDetailed(points).matrix;
+}
+
+function applyMatrixLinearLocal(colorLinear: RGB, matrix: ColorMatrix): RGB {
   const { matrix: m, offset } = matrix;
   return {
     r: m[0][0] * colorLinear.r + m[0][1] * colorLinear.g + m[0][2] * colorLinear.b + offset.r,
@@ -303,155 +474,18 @@ export function meanAbsoluteResidual(points: ColorPoint[], matrix: ColorMatrix):
   if (points.length === 0) return 0;
   let total = 0;
   for (const p of points) {
-    const out = applyColorMatrix(p.sampledColor, matrix);
+    const linear = applyMatrixLinearLocal(rgbToLinear(p.sampledColor), matrix);
+    const out = {
+      r: clampChannel(linearToSrgb(linear.r)),
+      g: clampChannel(linearToSrgb(linear.g)),
+      b: clampChannel(linearToSrgb(linear.b)),
+    };
     total +=
       Math.abs(out.r - p.targetColor.r) +
       Math.abs(out.g - p.targetColor.g) +
       Math.abs(out.b - p.targetColor.b);
   }
   return total / (points.length * 3);
-}
-
-function rgbVolumeHeuristic(points: ColorPoint[]): number {
-  if (points.length < 3) return 0;
-  const a = rgbToLinear(points[0].sampledColor);
-  const b = rgbToLinear(points[1].sampledColor);
-  const c = rgbToLinear(points[2].sampledColor);
-  // Scalar triple product magnitude — near 0 means collinear (e.g. greyscale only)
-  const ab = { r: b.r - a.r, g: b.g - a.g, b: b.b - a.b };
-  const ac = { r: c.r - a.r, g: c.g - a.g, b: c.b - a.b };
-  const cross = {
-    r: ab.g * ac.b - ab.b * ac.g,
-    g: ab.b * ac.r - ab.r * ac.b,
-    b: ab.r * ac.g - ab.g * ac.r,
-  };
-  return Math.sqrt(cross.r * cross.r + cross.g * cross.g + cross.b * cross.b);
-}
-
-/**
- * Multi-point least-squares color correction in linear sRGB.
- * Uses Tikhonov regularization and falls back to simple mode when
- * patches are collinear or residual is too high (classic W/G/B greyscale trap).
- */
-export function calculateAdvancedMatrix(points: ColorPoint[]): ColorMatrix {
-  return calculateAdvancedMatrixDetailed(points).matrix;
-}
-
-export function calculateAdvancedMatrixDetailed(points: ColorPoint[]): MatrixFitResult {
-  if (points.length < 3) {
-    const matrix = calculateSimpleMatrix(points);
-    return {
-      matrix,
-      meanResidual: meanAbsoluteResidual(points, matrix),
-      fellBackToSimple: true,
-      warning: 'Need at least 3 color patches for multi-point mode.',
-    };
-  }
-
-  // Greyscale-only patches can't constrain a full 3×3 — fall back early
-  if (rgbVolumeHeuristic(points) < 1e-4 && points.length <= 4) {
-    const matrix = calculateSimpleMatrix(points);
-    return {
-      matrix,
-      meanResidual: meanAbsoluteResidual(points, matrix),
-      fellBackToSimple: true,
-      warning:
-        'Calibration points are nearly collinear (e.g. only neutrals). Using 3-point diagonal correction instead.',
-    };
-  }
-
-  const useOffset = points.length >= 4;
-  const linearSamples = points.map((p) => rgbToLinear(p.sampledColor));
-  const linearTargets = points.map((p) => rgbToLinear(p.targetColor));
-
-  const A: number[][] = linearSamples.map((s) =>
-    useOffset ? [s.r, s.g, s.b, 1] : [s.r, s.g, s.b]
-  );
-
-  const solveForChannel = (targetValues: number[]): number[] => {
-    const AT = transpose(A);
-    const ATA = multiply(AT, A);
-    // Tikhonov: ATA + λI
-    for (let i = 0; i < ATA.length; i++) {
-      ATA[i][i] += REGULARIZATION;
-    }
-    const ATb = multiplyVector(AT, targetValues);
-    return solveLinear(ATA, ATb);
-  };
-
-  const coeffR = solveForChannel(linearTargets.map((t) => t.r));
-  const coeffG = solveForChannel(linearTargets.map((t) => t.g));
-  const coeffB = solveForChannel(linearTargets.map((t) => t.b));
-
-  if (!isFiniteVector(coeffR) || !isFiniteVector(coeffG) || !isFiniteVector(coeffB)) {
-    const matrix = calculateSimpleMatrix(points);
-    return {
-      matrix,
-      meanResidual: meanAbsoluteResidual(points, matrix),
-      fellBackToSimple: true,
-      warning: 'Multi-point solve failed numerically. Using 3-point correction.',
-    };
-  }
-
-  const matrix: ColorMatrix = {
-    matrix: [
-      [coeffR[0], coeffR[1], coeffR[2]],
-      [coeffG[0], coeffG[1], coeffG[2]],
-      [coeffB[0], coeffB[1], coeffB[2]],
-    ],
-    offset: useOffset
-      ? {
-          r: coeffR[3] ?? 0,
-          g: coeffG[3] ?? 0,
-          b: coeffB[3] ?? 0,
-        }
-      : { r: 0, g: 0, b: 0 },
-  };
-
-  const residual = meanAbsoluteResidual(points, matrix);
-  if (residual > MAX_MEAN_RESIDUAL) {
-    const fallback = calculateSimpleMatrix(points);
-    return {
-      matrix: fallback,
-      meanResidual: meanAbsoluteResidual(points, fallback),
-      fellBackToSimple: true,
-      warning: `Multi-point fit residual too high (${residual.toFixed(1)}). Using 3-point correction.`,
-    };
-  }
-
-  return {
-    matrix,
-    meanResidual: residual,
-    fellBackToSimple: false,
-  };
-}
-
-export function calculateMatrix(
-  points: ColorPoint[],
-  mode: 'simple' | 'advanced'
-): ColorMatrix {
-  return mode === 'advanced'
-    ? calculateAdvancedMatrix(points)
-    : calculateSimpleMatrix(points);
-}
-
-export function calculateMatrixDetailed(
-  points: ColorPoint[],
-  mode: 'simple' | 'advanced'
-): MatrixFitResult {
-  if (mode === 'advanced') {
-    return calculateAdvancedMatrixDetailed(points);
-  }
-  const matrix = calculateSimpleMatrix(points);
-  return {
-    matrix,
-    meanResidual: meanAbsoluteResidual(points, matrix),
-    fellBackToSimple: false,
-  };
-}
-
-function isFiniteVector(values: number[]): boolean {
-  return values.length > 0 && values.every((v) => Number.isFinite(v));
 }
 
 function transpose(m: number[][]): number[][] {
@@ -478,9 +512,62 @@ function multiplyVector(m: number[][], v: number[]): number[] {
   return m.map((row) => row.reduce((sum, val, i) => sum + val * (v[i] ?? 0), 0));
 }
 
-function solveLinear(A: number[][], b: number[]): number[] {
+/**
+ * Jacobi eigenvalues of a symmetric matrix. Used to measure how well the
+ * calibration samples constrain a full 3x3/affine fit (audit C1).
+ */
+function symmetricEigenvalues(input: number[][]): number[] {
+  const n = input.length;
+  const a = input.map((row) => [...row]);
+  for (let sweep = 0; sweep < 50; sweep++) {
+    let offDiagonal = 0;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) offDiagonal += a[i][j] * a[i][j];
+    }
+    if (offDiagonal < 1e-30) break;
+    for (let p = 0; p < n; p++) {
+      for (let q = p + 1; q < n; q++) {
+        if (Math.abs(a[p][q]) < 1e-18) continue;
+        const theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+        const sign = theta >= 0 ? 1 : -1;
+        const t = sign / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+        const c = 1 / Math.sqrt(t * t + 1);
+        const s = t * c;
+        for (let k = 0; k < n; k++) {
+          const akp = a[k][p];
+          const akq = a[k][q];
+          a[k][p] = c * akp - s * akq;
+          a[k][q] = s * akp + c * akq;
+        }
+        for (let k = 0; k < n; k++) {
+          const apk = a[p][k];
+          const aqk = a[q][k];
+          a[p][k] = c * apk - s * aqk;
+          a[q][k] = s * apk + c * aqk;
+        }
+      }
+    }
+  }
+  return a.map((row, i) => row[i]);
+}
+
+/** min/max eigenvalue ratio of A^T A; 0 means rank-deficient. */
+function conditioningRatio(A: number[][]): number {
+  const AT = transpose(A);
+  const ATA = multiply(AT, A);
+  const eigenvalues = symmetricEigenvalues(ATA).map((v) => Math.abs(v));
+  const max = Math.max(...eigenvalues);
+  if (!(max > 1e-18)) return 0;
+  return Math.min(...eigenvalues) / max;
+}
+
+function solveLinear(A: number[][], b: number[]): number[] | null {
   const n = A.length;
   const aug: number[][] = A.map((row, i) => [...row, b[i]]);
+  let scale = 0;
+  for (const row of A) for (const v of row) scale = Math.max(scale, Math.abs(v));
+  if (!(scale > 0)) return null;
+  const tolerance = 1e-12 * scale;
 
   for (let col = 0; col < n; col++) {
     let maxRow = col;
@@ -491,7 +578,7 @@ function solveLinear(A: number[][], b: number[]): number[] {
     }
     [aug[col], aug[maxRow]] = [aug[maxRow], aug[col]];
 
-    if (Math.abs(aug[col][col]) < 1e-12) continue;
+    if (Math.abs(aug[col][col]) < tolerance) return null;
 
     // Normalize pivot row for stability
     const pivot = aug[col][col];
@@ -508,16 +595,220 @@ function solveLinear(A: number[][], b: number[]): number[] {
     }
   }
 
-  return aug.map((row) => (Math.abs(row[n]) < 1e-12 ? 0 : row[n]));
+  const solution = aug.map((row) => (Math.abs(row[n]) < 1e-12 ? 0 : row[n]));
+  return solution.every((v) => Number.isFinite(v)) ? solution : null;
 }
 
-/** Apply matrix in linear light, return display-referred 8-bit RGB */
-export function applyColorMatrix(color: RGB, matrix: ColorMatrix): RGB {
-  const linear = applyMatrixLinear(rgbToLinear(color), matrix);
+function singularFallback(
+  points: ColorPoint[],
+  warnings: string[],
+  extra: Partial<FitDiagnostics> = {}
+): MatrixFitResult {
+  const simple = calculateSimpleMatrixDetailed(points);
   return {
-    r: clampChannel(linearToSrgb(linear.r)),
-    g: clampChannel(linearToSrgb(linear.g)),
-    b: clampChannel(linearToSrgb(linear.b)),
+    ...simple,
+    fellBackToSimple: true,
+    warning: warnings[0] ?? simple.warning,
+    warnings: [...warnings, ...simple.warnings],
+    diagnostics: { ...simple.diagnostics, mode: 'advanced', ...extra },
+  };
+}
+
+/**
+ * Multi-point least-squares color correction in linear sRGB.
+ *
+ * A full 3x3/affine fit is only used when the samples actually constrain it:
+ * rank/condition test over ALL samples plus chromatic evidence. Otherwise the
+ * deterministic simple fit is used with an explicit warning. This closes the
+ * near-neutral rank-1 desaturation trap (audit C1).
+ */
+export function calculateAdvancedMatrix(points: ColorPoint[]): ColorMatrix {
+  return calculateAdvancedMatrixDetailed(points).matrix;
+}
+
+export function calculateAdvancedMatrixDetailed(points: ColorPoint[]): MatrixFitResult {
+  if (points.length < 3) {
+    const simple = calculateSimpleMatrixDetailed(points);
+    return {
+      ...simple,
+      fellBackToSimple: true,
+      warning: 'Need at least 3 color patches for multi-point mode.',
+      warnings: ['Need at least 3 color patches for multi-point mode.', ...simple.warnings],
+      diagnostics: { ...simple.diagnostics, mode: 'advanced' },
+    };
+  }
+
+  if (points.some((p) => !finiteRgb(p.sampledColor) || !finiteRgb(p.targetColor))) {
+    return identityWithDiagnostics(points, 'advanced', ['Calibration point colours are not finite.']);
+  }
+
+  const chromaticSamples = countChromaticSamples(points);
+  if (chromaticSamples < FIT_THRESHOLDS.minChromaticSamples) {
+    return singularFallback(
+      points,
+      [
+        `Only ${chromaticSamples} chromatic patch(es) present; a full 3×3 fit needs at least ${FIT_THRESHOLDS.minChromaticSamples} non-collinear colour patches. Using the 3-point diagonal correction.`,
+      ],
+      { chromaticSamples }
+    );
+  }
+
+  const useOffset = points.length >= 4;
+  const linearSamples = points.map((p) => rgbToLinear(p.sampledColor));
+  const linearTargets = points.map((p) => rgbToLinear(p.targetColor));
+
+  const A: number[][] = linearSamples.map((s) =>
+    useOffset ? [s.r, s.g, s.b, 1] : [s.r, s.g, s.b]
+  );
+
+  const condition = conditioningRatio(A);
+  if (condition < FIT_THRESHOLDS.minConditionRatio) {
+    return singularFallback(
+      points,
+      [
+        'Calibration samples are rank-deficient (near-collinear), so a full 3×3 fit would be unstable. Using the 3-point diagonal correction.',
+      ],
+      { chromaticSamples, conditioningRatio: condition }
+    );
+  }
+
+  const solveForChannel = (targetValues: number[]): number[] | null => {
+    const AT = transpose(A);
+    const ATA = multiply(AT, A);
+    // Tikhonov: ATA + λI
+    for (let i = 0; i < ATA.length; i++) {
+      ATA[i][i] += REGULARIZATION;
+    }
+    const ATb = multiplyVector(AT, targetValues);
+    return solveLinear(ATA, ATb);
+  };
+
+  const coeffR = solveForChannel(linearTargets.map((t) => t.r));
+  const coeffG = solveForChannel(linearTargets.map((t) => t.g));
+  const coeffB = solveForChannel(linearTargets.map((t) => t.b));
+
+  if (!coeffR || !coeffG || !coeffB) {
+    return singularFallback(
+      points,
+      ['Multi-point solve failed numerically (singular system). Using 3-point correction.'],
+      { chromaticSamples, conditioningRatio: condition }
+    );
+  }
+
+  const matrix: ColorMatrix = {
+    matrix: [
+      [coeffR[0], coeffR[1], coeffR[2]],
+      [coeffG[0], coeffG[1], coeffG[2]],
+      [coeffB[0], coeffB[1], coeffB[2]],
+    ],
+    offset: useOffset
+      ? {
+          r: coeffR[3] ?? 0,
+          g: coeffG[3] ?? 0,
+          b: coeffB[3] ?? 0,
+        }
+      : { r: 0, g: 0, b: 0 },
+  };
+
+  const validation = validateColorMatrix(matrix);
+  if (!validation.ok) {
+    return singularFallback(
+      points,
+      [
+        `Multi-point fit produced coefficients outside the supported bounds (${validation.errors[0]}). Using 3-point correction.`,
+      ],
+      { chromaticSamples, conditioningRatio: condition }
+    );
+  }
+
+  const assessment = assessMatrix(matrix);
+  if (assessment.destructive) {
+    return singularFallback(
+      points,
+      [
+        `Multi-point fit was rejected by the colour guardrail (${assessment.reasons.join('; ')}). Using 3-point correction.`,
+      ],
+      {
+        chromaticSamples,
+        conditioningRatio: condition,
+        clippingForecast: assessment.clippingFraction,
+        saturationRetention: assessment.saturationRetention,
+      }
+    );
+  }
+
+  const residual = meanAbsoluteResidual(points, matrix);
+  if (residual > MAX_MEAN_RESIDUAL) {
+    return singularFallback(
+      points,
+      [
+        `Multi-point fit residual too high (${residual.toFixed(1)} DN). Using 3-point correction.`,
+      ],
+      {
+        chromaticSamples,
+        conditioningRatio: condition,
+        clippingForecast: assessment.clippingFraction,
+        saturationRetention: assessment.saturationRetention,
+      }
+    );
+  }
+
+  const warnings: string[] = [];
+  if (assessment.clippingFraction > FIT_THRESHOLDS.clipWarnFraction) {
+    warnings.push(
+      `This calibration clips about ${(assessment.clippingFraction * 100).toFixed(0)}% of typical colour channels.`
+    );
+  }
+  if (duplicateRoles(points).length > 0) {
+    warnings.push('Duplicate role labels were used as independent samples; verify point roles.');
+  }
+
+  return {
+    matrix,
+    meanResidual: residual,
+    fellBackToSimple: false,
+    warning: warnings[0],
+    warnings,
+    diagnostics: {
+      mode: 'advanced',
+      algorithmVersion: ALGORITHM_VERSION,
+      sampleCount: points.length,
+      chromaticSamples,
+      conditioningRatio: condition,
+      minAnchorSeparation: null,
+      clippingForecast: assessment.clippingFraction,
+      saturationRetention: assessment.saturationRetention,
+      duplicateRoles: duplicateRoles(points),
+      destructiveFallback: false,
+    },
+  };
+}
+
+export function calculateMatrix(
+  points: ColorPoint[],
+  mode: 'simple' | 'advanced'
+): ColorMatrix {
+  return mode === 'advanced'
+    ? calculateAdvancedMatrix(points)
+    : calculateSimpleMatrix(points);
+}
+
+export function calculateMatrixDetailed(
+  points: ColorPoint[],
+  mode: 'simple' | 'advanced'
+): MatrixFitResult {
+  return mode === 'advanced'
+    ? calculateAdvancedMatrixDetailed(points)
+    : calculateSimpleMatrixDetailed(points);
+}
+
+/** Apply matrix in linear light, return display-referred 8-bit RGB. */
+export function applyColorMatrix(color: RGB, matrix: ColorMatrix): RGB {
+  const linear = applyMatrixLinearLocal(rgbToLinear(color), matrix);
+  return {
+    r: encodeLinear8(linear.r),
+    g: encodeLinear8(linear.g),
+    b: encodeLinear8(linear.b),
   };
 }
 
@@ -535,51 +826,48 @@ export function applyColorCorrectionToImage(
   if (!sourceCtx || !destCtx) return destCanvas;
 
   const imageData = sourceCtx.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
-  const data = imageData.data;
-  const { matrix: m, offset } = matrix;
-
-  // Precompute LUTs for sRGB ↔ linear to speed up large batches
-  const toLinear = new Float32Array(256);
-  const toSrgb = new Uint8ClampedArray(4096); // quantized linear 0..1 → sRGB
-  for (let i = 0; i < 256; i++) {
-    toLinear[i] = srgbToLinear(i);
-  }
-  for (let i = 0; i < 4096; i++) {
-    toSrgb[i] = clampChannel(linearToSrgb(i / 4095));
-  }
-  const encode = (v: number) => {
-    if (v <= 0) return 0;
-    if (v >= 1) return 255;
-    return toSrgb[(v * 4095) | 0];
-  };
-
-  for (let i = 0; i < data.length; i += 4) {
-    const r = toLinear[data[i]];
-    const g = toLinear[data[i + 1]];
-    const b = toLinear[data[i + 2]];
-
-    data[i] = encode(m[0][0] * r + m[0][1] * g + m[0][2] * b + offset.r);
-    data[i + 1] = encode(m[1][0] * r + m[1][1] * g + m[1][2] * b + offset.g);
-    data[i + 2] = encode(m[2][0] * r + m[2][1] * g + m[2][2] * b + offset.b);
-  }
-
+  applyMatrixToRgba8(imageData.data, matrix);
   destCtx.putImageData(imageData, 0, 0);
   return destCanvas;
 }
 
+/**
+ * Fit an image inside a longest-edge and total-pixel budget. Pure function so
+ * the calibration canvas cap is unit-testable without a DOM (audit C10).
+ */
+export function computeFittedSize(
+  width: number,
+  height: number,
+  maxEdge: number,
+  maxPixels: number
+): { width: number; height: number; scale: number } {
+  if (!(width > 0) || !(height > 0) || !Number.isFinite(width) || !Number.isFinite(height)) {
+    return { width: 1, height: 1, scale: 0 };
+  }
+  const edgeScale = Math.min(1, maxEdge / Math.max(width, height));
+  const pixelScale = Math.min(1, Math.sqrt(maxPixels / (width * height)));
+  const scale = Math.min(edgeScale, pixelScale, 1);
+  let outWidth = Math.max(1, Math.floor(width * scale));
+  let outHeight = Math.max(1, Math.floor(height * scale));
+  // Integer rounding can leave the product a few pixels over budget.
+  while (outWidth * outHeight > maxPixels) {
+    if (outWidth >= outHeight && outWidth > 1) outWidth -= 1;
+    else if (outHeight > 1) outHeight -= 1;
+    else break;
+  }
+  return {
+    width: outWidth,
+    height: outHeight,
+    scale,
+  };
+}
+
 function drawBitmapToCanvas(
   bitmap: ImageBitmap,
-  maxDimension = MAX_IMAGE_DIMENSION
+  maxDimension = MAX_IMAGE_DIMENSION,
+  maxPixels = IMAGE_LIMITS.maxPixels
 ): HTMLCanvasElement {
-  let width = bitmap.width;
-  let height = bitmap.height;
-
-  const longest = Math.max(width, height);
-  if (longest > maxDimension) {
-    const scale = maxDimension / longest;
-    width = Math.max(1, Math.round(width * scale));
-    height = Math.max(1, Math.round(height * scale));
-  }
+  const { width, height } = computeFittedSize(bitmap.width, bitmap.height, maxDimension, maxPixels);
 
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -594,11 +882,12 @@ function drawBitmapToCanvas(
 
 /**
  * Load an image file onto a canvas, respecting EXIF orientation and
- * optionally downsampling extremely large images.
+ * downsampling to the shared edge/pixel limits.
  */
 export async function loadImageToCanvas(
   file: File,
-  maxDimension = MAX_IMAGE_DIMENSION
+  maxDimension = MAX_IMAGE_DIMENSION,
+  maxPixels = IMAGE_LIMITS.maxPixels
 ): Promise<HTMLCanvasElement> {
   if (!file.type.startsWith('image/') || file.type === 'image/svg+xml') {
     throw new Error('Unsupported image type');
@@ -610,41 +899,37 @@ export async function loadImageToCanvas(
       resizeWidth: undefined,
       resizeHeight: undefined,
     });
-    return drawBitmapToCanvas(bitmap, maxDimension);
+    return drawBitmapToCanvas(bitmap, maxDimension, maxPixels);
   } catch {
     // Fallback for environments without createImageBitmap options support
-    return loadImageToCanvasLegacy(file, maxDimension);
+    return loadImageToCanvasLegacy(file, maxDimension, maxPixels);
   }
 }
 
 function loadImageToCanvasLegacy(
   file: File,
-  maxDimension: number
+  maxDimension: number,
+  maxPixels: number
 ): Promise<HTMLCanvasElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
 
     img.onload = () => {
-      let width = img.naturalWidth || img.width;
-      let height = img.naturalHeight || img.height;
-      const longest = Math.max(width, height);
-      if (longest > maxDimension) {
-        const scale = maxDimension / longest;
-        width = Math.max(1, Math.round(width * scale));
-        height = Math.max(1, Math.round(height * scale));
-      }
+      const width = img.naturalWidth || img.width;
+      const height = img.naturalHeight || img.height;
+      const fitted = computeFittedSize(width, height, maxDimension, maxPixels);
 
       const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
+      canvas.width = fitted.width;
+      canvas.height = fitted.height;
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) {
         URL.revokeObjectURL(url);
         reject(new Error('Failed to get canvas context'));
         return;
       }
-      ctx.drawImage(img, 0, 0, width, height);
+      ctx.drawImage(img, 0, 0, fitted.width, fitted.height);
       URL.revokeObjectURL(url);
       resolve(canvas);
     };
@@ -686,23 +971,4 @@ export function formatFromMime(mime: string | undefined, fallback: 'jpeg' | 'png
   if (mime === 'image/png') return 'png';
   if (mime === 'image/jpeg') return 'jpeg';
   return fallback;
-}
-
-export function isValidColorMatrix(value: unknown): value is ColorMatrix {
-  if (!value || typeof value !== 'object') return false;
-  const m = value as ColorMatrix;
-  return (
-    Array.isArray(m.matrix) &&
-    m.matrix.length === 3 &&
-    m.matrix.every(
-      (row) =>
-        Array.isArray(row) &&
-        row.length === 3 &&
-        row.every((n) => typeof n === 'number' && Number.isFinite(n))
-    ) &&
-    !!m.offset &&
-    typeof m.offset.r === 'number' &&
-    typeof m.offset.g === 'number' &&
-    typeof m.offset.b === 'number'
-  );
 }
