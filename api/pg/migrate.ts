@@ -303,13 +303,14 @@ export async function verifySchema(
   }
 
   const keyRows = await pool.query<{ table_name: string; column_name: string }>(
-    `SELECT tc.table_name, kcu.column_name
-       FROM information_schema.table_constraints tc
-       JOIN information_schema.key_column_usage kcu
-         ON kcu.constraint_name = tc.constraint_name
-        AND kcu.constraint_schema = tc.constraint_schema
-      WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = $1
-      ORDER BY tc.table_name, kcu.ordinal_position`,
+    `SELECT c.relname AS table_name, a.attname AS column_name
+       FROM pg_catalog.pg_constraint con
+       JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+       JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
+       CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, position)
+       JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
+      WHERE con.contype = 'p' AND ns.nspname = $1
+      ORDER BY c.relname, k.position`,
     [schema]
   );
   const keysByTable = new Map<string, string[]>();
