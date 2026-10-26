@@ -10,9 +10,13 @@ profiles for workflow use.
 
 - Calibrate using white/grey/black or a multi-point colour chart
 - Rank/conditioning, chromatic-evidence, clipping and desaturation guardrails
-  reject destructive fits instead of silently producing a grey batch
+  reject destructive fits instead of silently producing a grey batch. The API
+  refuses (`422 MATRIX_REJECTED`) a calibration whose only fit is the engine's
+  identity fallback, and imported presets are checked with the same guardrail.
 - Versioned presets: every save appends an immutable revision with points,
-  targets, matrix, algorithm version, diagnostics, fingerprint and provenance
+  targets, matrix, algorithm version, diagnostics, fingerprint and provenance.
+  Unreadable stored presets are quarantined verbatim (never deleted by a later
+  save) and can be exported for recovery.
 - Batch workflows select a preset **and an explicit revision** — never an
   implicit "latest"
 - Save revisions to a private API, list/get them, and correct by
@@ -85,7 +89,9 @@ api/
 ## Colour and fidelity contract
 
 - Corrections run in linear sRGB. Browser and API share one quantised 16-bit LUT
-  encode, so an 8-bit correction is byte-identical in both paths.
+  encode, so an 8-bit correction is pixel-identical in both paths. The PNG
+  encoders differ (`sharp` vs `canvas.toBlob`), so output files are not
+  byte-identical; only the decoded pixels are.
 - The API preserves 16-bit input at 16 bits and tags output with sRGB
   `gAMA`/`cHRM`; 8-bit output carries an sRGB ICC profile.
 - Untagged wide-gamut inputs are assumed sRGB.

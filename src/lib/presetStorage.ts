@@ -16,14 +16,15 @@ import {
   CALIBRATION_LIMITS,
   REVISION_SCHEMA_VERSION,
 } from '@/lib/calibrationLimits';
-import { revisionFingerprint } from '@/lib/matrixFingerprint';
+import { revisionFingerprint, matrixFingerprint } from '@/lib/matrixFingerprint';
+import { assessMatrix } from '@/lib/matrixValidation';
 
 const STORAGE_KEY = 'colorCorrector_presets';
 const RECENT_KEY = 'colorCorrector_recentPresets';
 const MAX_RECENT = 5;
 
 export class PresetStorageError extends Error {
-  code: 'INVALID_PRESET' | 'STORAGE_FULL' | 'REVISION_LIMIT' | 'NOT_FOUND';
+  code: 'INVALID_PRESET' | 'STORAGE_FULL' | 'REVISION_LIMIT' | 'NOT_FOUND' | 'CORRUPT_STORAGE';
 
   constructor(code: PresetStorageError['code'], message: string) {
     super(message);
@@ -127,18 +128,30 @@ function buildRevision(
   const fit =
     options.fit ??
     calculateMatrixDetailed(normalizedPoints, mode);
+
+  // A stored revision must agree with the fit it claims to represent. Legacy
+  // revisions are preserved as-is (their matrix predates this engine).
+  const useFit = algorithmVersion === ALGORITHM_VERSION;
+  if (useFit && matrixFingerprint(matrix) !== matrixFingerprint(fit.matrix)) {
+    throw new PresetStorageError(
+      'INVALID_PRESET',
+      'The calibration matrix does not match the fit for these points and mode; re-fit before saving.'
+    );
+  }
+  const storedMatrix = useFit ? fit.matrix : matrix;
+
   const fingerprint = revisionFingerprint({
     algorithmVersion,
     mode,
     points: normalizedPoints,
-    matrix,
+    matrix: storedMatrix,
   });
 
   return {
     revision,
     createdAt,
     points: normalizedPoints,
-    matrix,
+    matrix: storedMatrix,
     mode,
     algorithmVersion,
     fingerprint,
@@ -251,6 +264,28 @@ function isValidPreset(value: unknown): value is CalibrationPreset {
   return true;
 }
 
+function matrixDestructiveReason(matrix: CalibrationPreset['matrix']): string | null {
+  if (!matrix || !isValidColorMatrix(matrix)) return null;
+  const assessment = assessMatrix(matrix);
+  return assessment.destructive ? assessment.reasons.join('; ') : null;
+}
+
+/**
+ * Guardrail used by import and batch apply: a revision whose matrix would
+ * destroy colour data must never be applied as a usable correction.
+ */
+export function destructiveRevisionReason(revision: CalibrationRevision): string | null {
+  return matrixDestructiveReason(revision.matrix);
+}
+
+function destructivePresetReason(preset: CalibrationPreset): string | null {
+  for (const revision of preset.revisions ?? []) {
+    const reason = destructiveRevisionReason(revision);
+    if (reason) return reason;
+  }
+  return matrixDestructiveReason(preset.matrix);
+}
+
 /** Migrate a v1 preset (matrix, no revisions) to an immutable revision. */
 function migratePreset(input: CalibrationPreset): CalibrationPreset {
   const points = input.points.map(normalizePoint);
@@ -290,7 +325,7 @@ function migratePreset(input: CalibrationPreset): CalibrationPreset {
   };
 }
 
-function persist(presets: CalibrationPreset[]): void {
+function persist(presets: unknown[]): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(presets));
   } catch {
@@ -301,21 +336,112 @@ function persist(presets: CalibrationPreset[]): void {
   }
 }
 
-function readRawPresets(): unknown[] {
+function corruptStorageError(): PresetStorageError {
+  return new PresetStorageError(
+    'CORRUPT_STORAGE',
+    'Saved presets could not be read. Nothing was overwritten; export the raw data or reset local storage before saving again.'
+  );
+}
+
+function readRawPresets(options: { strict?: boolean } = {}): unknown[] {
+  let stored: string | null = null;
   try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (!stored) return [];
-    const parsed = JSON.parse(stored);
-    return Array.isArray(parsed) ? parsed : [];
+    stored = localStorage.getItem(STORAGE_KEY);
   } catch {
+    if (options.strict) throw corruptStorageError();
+    return [];
+  }
+  if (!stored) return [];
+  try {
+    const parsed = JSON.parse(stored);
+    if (Array.isArray(parsed)) return parsed;
+    if (options.strict) throw corruptStorageError();
+    return [];
+  } catch (error) {
+    if (error instanceof PresetStorageError) throw error;
+    if (options.strict) throw corruptStorageError();
     return [];
   }
 }
 
+/** Raw localStorage value, for recovery/export when records are unreadable. */
+export function getRawPresetStorage(): string | null {
+  try {
+    return localStorage.getItem(STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** Records that exist in storage but no longer pass validation. */
+export function getQuarantinedPresets(): unknown[] {
+  return readRawPresets().filter((entry) => !isValidPreset(entry));
+}
+
+export function getQuarantinedPresetCount(): number {
+  return getQuarantinedPresets().length;
+}
+
+/** True when the stored container itself is unreadable (writes fail closed). */
+export function isPresetStorageCorrupt(): boolean {
+  const stored = getRawPresetStorage();
+  if (!stored) return false;
+  try {
+    return !Array.isArray(JSON.parse(stored));
+  } catch {
+    return true;
+  }
+}
+
+export function exportQuarantinedPresetsToJson(): string {
+  return JSON.stringify(
+    {
+      version: REVISION_SCHEMA_VERSION,
+      exportedAt: Date.now(),
+      quarantined: getQuarantinedPresets(),
+    },
+    null,
+    2
+  );
+}
+
+function validPresetsFrom(raw: unknown[]): CalibrationPreset[] {
+  return raw.filter(isValidPreset).map(migratePreset);
+}
+
 export function getAllPresets(): CalibrationPreset[] {
-  return readRawPresets()
-    .filter(isValidPreset)
-    .map(migratePreset);
+  return validPresetsFrom(readRawPresets());
+}
+
+/**
+ * Persist the valid preset list while keeping every unreadable raw record
+ * verbatim. A read-filter-write cycle must never delete data it could not
+ * parse; only records the caller deliberately removed are dropped.
+ */
+function writePresets(next: CalibrationPreset[], raw: unknown[]): void {
+  const byId = new Map(next.map((preset) => [preset.id, preset]));
+  const written = new Set<string>();
+  const out: unknown[] = [];
+
+  for (const entry of raw) {
+    if (isValidPreset(entry)) {
+      const replacement = byId.get(entry.id);
+      if (replacement && !written.has(entry.id)) {
+        out.push(replacement);
+        written.add(entry.id);
+      }
+      continue;
+    }
+    out.push(entry);
+  }
+
+  for (const preset of next) {
+    if (written.has(preset.id)) continue;
+    out.push(preset);
+    written.add(preset.id);
+  }
+
+  persist(out);
 }
 
 export function getPreset(id: string): CalibrationPreset | null {
@@ -356,7 +482,8 @@ export function savePreset(preset: CalibrationPreset): CalibrationPreset {
     throw new PresetStorageError('INVALID_PRESET', 'Calibration matrix is not valid');
   }
 
-  const presets = getAllPresets();
+  const raw = readRawPresets({ strict: true });
+  const presets = validPresetsFrom(raw);
   const existingIndex = presets.findIndex((p) => p.id === preset.id);
   const existing = existingIndex >= 0 ? presets[existingIndex] : null;
   const fit = fitFor(preset.points, preset.mode);
@@ -391,7 +518,7 @@ export function savePreset(preset: CalibrationPreset): CalibrationPreset {
       currentRevision: latest.revision,
     };
     if (existingIndex >= 0) presets[existingIndex] = unchanged;
-    persist(presets);
+    writePresets(presets, raw);
     addToRecent(unchanged.id);
     return unchanged;
   }
@@ -412,7 +539,7 @@ export function savePreset(preset: CalibrationPreset): CalibrationPreset {
   if (existingIndex >= 0) presets[existingIndex] = next;
   else presets.push(next);
 
-  persist(presets);
+  writePresets(presets, raw);
   addToRecent(next.id);
   return next;
 }
@@ -426,8 +553,11 @@ function presetNameIsValid(name: unknown): name is string {
 }
 
 export function deletePreset(id: string): void {
-  const presets = getAllPresets().filter((p) => p.id !== id);
-  persist(presets);
+  const raw = readRawPresets({ strict: true });
+  writePresets(
+    validPresetsFrom(raw).filter((p) => p.id !== id),
+    raw
+  );
   removeFromRecent(id);
 }
 
@@ -513,11 +643,17 @@ export function importPresetsFromJson(json: string): { imported: number; skipped
 
   let imported = 0;
   let skipped = 0;
-  const existing = getAllPresets();
-  const byId = new Map(existing.map((p) => [p.id, p]));
+  const raw = readRawPresets({ strict: true });
+  const byId = new Map(validPresetsFrom(raw).map((p) => [p.id, p]));
 
   for (const item of list) {
     if (!isValidPreset(item)) {
+      skipped += 1;
+      continue;
+    }
+    // Imports bypass the save path, so apply the same colour guardrail here:
+    // never store a preset whose revision would destroy image data.
+    if (destructivePresetReason(item)) {
       skipped += 1;
       continue;
     }
@@ -526,7 +662,7 @@ export function importPresetsFromJson(json: string): { imported: number; skipped
     imported += 1;
   }
 
-  persist(Array.from(byId.values()));
+  writePresets(Array.from(byId.values()), raw);
   return { imported, skipped };
 }
 

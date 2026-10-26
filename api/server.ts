@@ -334,9 +334,17 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
         }
 
         if (req.method === 'GET' && segments.length === 5 && segments[3] === 'revisions') {
-          const revisionNumber = Number(segments[4]);
-          if (!Number.isInteger(revisionNumber) || revisionNumber < 1) {
-            throw new ApiError(422, 'INVALID_REQUEST', 'revision must be a positive integer');
+          const revisionSegment = segments[4];
+          if (!/^[1-9][0-9]*$/.test(revisionSegment)) {
+            throw new ApiError(
+              422,
+              'INVALID_REQUEST',
+              'revision must be a canonical positive integer (no leading zeros, exponents or decimals)'
+            );
+          }
+          const revisionNumber = Number(revisionSegment);
+          if (!Number.isSafeInteger(revisionNumber)) {
+            throw new ApiError(422, 'INVALID_REQUEST', 'revision is outside the supported range');
           }
           const revision = store.getRevision(profileId, revisionNumber);
           if (!revision) {

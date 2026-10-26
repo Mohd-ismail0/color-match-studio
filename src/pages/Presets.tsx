@@ -10,6 +10,10 @@ import {
   getAllPresets,
   deletePreset,
   exportPresetsToJson,
+  exportQuarantinedPresetsToJson,
+  getQuarantinedPresetCount,
+  getRawPresetStorage,
+  isPresetStorageCorrupt,
   importPresetsFromJson,
 } from '@/lib/presetStorage';
 import { Settings2, Search, BookMarked, Download, Upload, CloudUpload } from 'lucide-react';
@@ -53,9 +57,19 @@ export default function Presets() {
   const [publishRevision, setPublishRevision] = useState<number | null>(null);
   const [publishName, setPublishName] = useState('');
   const [publishing, setPublishing] = useState(false);
+  const [quarantinedCount, setQuarantinedCount] = useState(0);
+  const [storageCorrupt, setStorageCorrupt] = useState(false);
+
+  const refreshPresets = () => {
+    setPresets(getAllPresets());
+    setQuarantinedCount(getQuarantinedPresetCount());
+    setStorageCorrupt(isPresetStorageCorrupt());
+  };
 
   useEffect(() => {
     setPresets(getAllPresets());
+    setQuarantinedCount(getQuarantinedPresetCount());
+    setStorageCorrupt(isPresetStorageCorrupt());
   }, []);
 
   const filteredPresets = presets.filter((preset) =>
@@ -78,7 +92,7 @@ export default function Presets() {
   const confirmDelete = () => {
     if (deleteId) {
       deletePreset(deleteId);
-      setPresets(getAllPresets());
+      refreshPresets();
       toast.success('Preset deleted');
       setDeleteId(null);
     }
@@ -134,11 +148,24 @@ export default function Presets() {
     toast.success('Presets exported');
   };
 
+  const handleExportUnreadable = () => {
+    const json = storageCorrupt
+      ? (getRawPresetStorage() ?? '')
+      : exportQuarantinedPresetsToJson();
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `colorfix-unreadable-presets-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handleImportFile = async (file: File) => {
     try {
       const text = await file.text();
       const { imported, skipped } = importPresetsFromJson(text);
-      setPresets(getAllPresets());
+      refreshPresets();
       if (imported === 0) {
         toast.error('No valid presets found in file');
         return;
@@ -315,6 +342,28 @@ export default function Presets() {
               className="pl-10 min-h-10"
               aria-label="Search presets"
             />
+          </div>
+        )}
+
+        {(storageCorrupt || quarantinedCount > 0) && (
+          <div
+            role="alert"
+            className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm space-y-2"
+          >
+            <p className="font-medium">
+              {storageCorrupt
+                ? 'Saved preset data could not be read.'
+                : `${quarantinedCount} saved preset${quarantinedCount === 1 ? '' : 's'} could not be read.`}
+            </p>
+            <p className="text-muted-foreground">
+              {storageCorrupt
+                ? 'Nothing has been deleted, and saving is blocked until this is resolved. Download the raw value before resetting browser storage.'
+                : 'These records are kept exactly as stored and are not used for correction. Download them before repairing or resetting browser storage.'}
+            </p>
+            <Button variant="outline" size="sm" onClick={handleExportUnreadable}>
+              <Download className="w-4 h-4 mr-2" />
+              Download unreadable data
+            </Button>
           </div>
         )}
 

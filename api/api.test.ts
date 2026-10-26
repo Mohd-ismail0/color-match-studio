@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -15,7 +16,9 @@ import {
   applyColorMatrix,
   calculateMatrixDetailed,
 } from '@/lib/colorCorrection';
-import type { ColorPoint } from '@/types/colorCorrector';
+import { canonicalRevisionPayload } from '@/lib/matrixFingerprint';
+import { assessMatrix } from '@/lib/matrixValidation';
+import type { ColorMatrix, ColorPoint } from '@/types/colorCorrector';
 
 const KEY = 'vitest-9f3a7c1e5b8d2f4a6c0e9b7d3a1f5c8e';
 const AUTH = { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' };
@@ -285,6 +288,175 @@ describe('calibration persistence and explicit revisions', () => {
     });
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('MATRIX_MISMATCH');
+  });
+
+  it('refuses a destructive fit instead of storing identity as a usable revision', async () => {
+    const destructivePoints: ColorPoint[] = [
+      {
+        id: 'w',
+        label: 'White',
+        role: 'white',
+        x: 0.2,
+        y: 0.2,
+        sampledColor: { r: 250, g: 250, b: 250 },
+        targetColor: { r: 255, g: 255, b: 255 },
+      },
+      {
+        id: 'b',
+        label: 'Black',
+        role: 'black',
+        x: 0.8,
+        y: 0.8,
+        sampledColor: { r: 200, g: 200, b: 200 },
+        targetColor: { r: 0, g: 0, b: 0 },
+      },
+    ];
+    const fit = calculateMatrixDetailed(destructivePoints, 'simple');
+    expect(fit.diagnostics.destructiveFallback).toBe(true);
+
+    const refused = await jsonRequest('POST', '/v1/calibrations', {
+      name: 'Destructive anchor pair',
+      points: destructivePoints,
+      mode: 'simple',
+    });
+    expect(refused.status).toBe(422);
+    expect(refused.body.error.code).toBe('MATRIX_REJECTED');
+    expect(refused.body.error.message).toMatch(/destroy|usable/i);
+
+    // Nothing was stored: there is no identity no-op pretending to be a calibration.
+    const listed = await jsonRequest('GET', '/v1/calibrations?limit=200');
+    expect(
+      listed.body.profiles.some((p: { name: string }) => p.name === 'Destructive anchor pair')
+    ).toBe(false);
+  });
+
+  it('fits every role-less simple point instead of silently using only the first', async () => {
+    const chart: ColorPoint[] = [
+      {
+        id: 'a',
+        label: 'chart patch A',
+        x: 0.2,
+        y: 0.2,
+        sampledColor: { r: 180, g: 120, b: 60 },
+        targetColor: { r: 190, g: 110, b: 70 },
+      },
+      {
+        id: 'b',
+        label: 'chart patch B',
+        x: 0.5,
+        y: 0.5,
+        sampledColor: { r: 80, g: 160, b: 90 },
+        targetColor: { r: 70, g: 170, b: 100 },
+      },
+      {
+        id: 'c',
+        label: 'chart patch C',
+        x: 0.8,
+        y: 0.8,
+        sampledColor: { r: 60, g: 90, b: 170 },
+        targetColor: { r: 50, g: 100, b: 180 },
+      },
+    ];
+    const accepted = await jsonRequest('POST', '/v1/calibrations', {
+      name: 'Role-less chart',
+      points: chart,
+      mode: 'simple',
+    });
+    expect(accepted.status).toBe(201);
+    expect(accepted.body.revision.matrix).toEqual(
+      calculateMatrixDetailed(chart, 'simple').matrix
+    );
+    expect(accepted.body.revision.matrix).not.toEqual(
+      calculateMatrixDetailed([chart[0]], 'simple').matrix
+    );
+    expect(accepted.body.revision.provenance.warnings.join(' ')).toMatch(
+      /No White, Grey or Black anchor/
+    );
+    expect(accepted.body.revision.meanResidual).toBeGreaterThan(0);
+  });
+
+  it('accepts only canonical revision path segments', async () => {
+    const created = await createProfile('Canonical revisions');
+    for (const spelling of ['1e0', '01', '1.0', '+1', '-1', '0', '%31', '99999999999999999999']) {
+      const res = await jsonRequest(
+        'GET',
+        `/v1/calibrations/${created.profileId}/revisions/${spelling}`
+      );
+      expect(res.status, spelling).toBe(422);
+      expect(res.body.error.code).toBe('INVALID_REQUEST');
+    }
+    const canonical = await jsonRequest(
+      'GET',
+      `/v1/calibrations/${created.profileId}/revisions/1`
+    );
+    expect(canonical.status).toBe(200);
+    expect(canonical.body.revision.revision).toBe(1);
+  });
+
+  it('rejects a stored matrix that is not the engine fit even with a recomputed hash', async () => {
+    const created = await createProfile('Tamper target');
+    const original = server.store.getRevision(created.profileId, 1);
+    expect(original).not.toBeNull();
+
+    const forged: ColorMatrix = {
+      matrix: [
+        [1.05, 0, 0],
+        [0, 1.02, 0],
+        [0, 0, 0.98],
+      ],
+      offset: { r: 0, g: 0, b: 0 },
+    };
+    expect(assessMatrix(forged).destructive).toBe(false);
+    // Rewrite the matrix and recompute the unkeyed content hash, leaving the
+    // matrix-derived fingerprint matching the true fit.
+    const forgedHash = createHash('sha256')
+      .update(
+        canonicalRevisionPayload({
+          algorithmVersion: original!.algorithmVersion,
+          mode: original!.mode,
+          points: original!.points,
+          matrix: forged,
+        })
+      )
+      .digest('hex');
+
+    interface RawDb {
+      exec: (sql: string) => void;
+      prepare: (sql: string) => { run: (...args: unknown[]) => void };
+    }
+    const db = (server.store as unknown as { db: RawDb }).db;
+    db.exec('DROP TRIGGER IF EXISTS revisions_immutable_update');
+    try {
+      db.prepare(
+        'UPDATE revisions SET matrix_json = ?, content_hash = ? WHERE profile_id = ? AND revision = 1'
+      ).run(JSON.stringify(forged), forgedHash, created.profileId);
+    } finally {
+      db.exec(`
+        CREATE TRIGGER IF NOT EXISTS revisions_immutable_update
+        BEFORE UPDATE ON revisions
+        BEGIN
+          SELECT RAISE(ABORT, 'calibration revisions are immutable');
+        END;
+      `);
+    }
+
+    const fetched = await jsonRequest(
+      'GET',
+      `/v1/calibrations/${created.profileId}/revisions/1`
+    );
+    expect(fetched.status).toBe(500);
+    expect(fetched.body.error.code).toBe('REVISION_INTEGRITY');
+
+    const correction = await fetch(`${base}/v1/correct`, {
+      method: 'POST',
+      headers: AUTH,
+      body: JSON.stringify({
+        imageBase64: (await image8()).toString('base64'),
+        calibration: { profileId: created.profileId, revision: 1 },
+      }),
+    });
+    expect(correction.status).toBe(500);
+    expect((await correction.json()).error.code).toBe('REVISION_INTEGRITY');
   });
 
   it('accepts hand-plausible low-contrast calibrations the UI can produce (audit C5)', async () => {

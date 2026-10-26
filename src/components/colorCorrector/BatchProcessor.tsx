@@ -16,6 +16,7 @@ import {
   hasStaleCompletedResults,
   isProcessedResultStale,
 } from '@/lib/batchStaleness';
+import { destructiveRevisionReason } from '@/lib/presetStorage';
 import { DropZone } from './DropZone';
 import { ImageThumbnail } from './ImageThumbnail';
 import { Button } from '@/components/ui/button';
@@ -164,6 +165,14 @@ export function BatchProcessor({ selection }: BatchProcessorProps) {
   const processImages = useCallback(async (reprocessAll = false) => {
     if (!selection) {
       toast.error('Select a calibration profile and revision first');
+      return;
+    }
+
+    const blocked = destructiveRevisionReason(selection.revision);
+    if (blocked) {
+      toast.error(
+        `This revision fails the colour safety guardrail (${blocked}) and was not applied. Choose or import a different revision.`
+      );
       return;
     }
 

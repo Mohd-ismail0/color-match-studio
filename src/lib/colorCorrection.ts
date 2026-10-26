@@ -409,12 +409,23 @@ export function calculateSimpleMatrixDetailed(points: ColorPoint[]): MatrixFitRe
     const fitPoints = [whitePoint, greyPoint, blackPoint].filter(
       (p): p is ColorPoint => !!p
     );
-    if (fitPoints.length === 0 && points.length === 1) {
+    let fitSamples: ColorPoint[];
+    if (fitPoints.length > 0) {
+      fitSamples = fitPoints;
+    } else if (points.length === 1) {
+      // A single custom target is a legitimate simple-mode calibration:
+      // per-channel scale with no offset.
       warnings.push('Only one calibration point: correction is a per-channel scale with no offset.');
+      fitSamples = points;
+    } else {
+      // No White/Grey/Black anchor resolved. Never silently discard the
+      // remaining patches: fit every point diagonally and say so.
+      warnings.push(
+        `No White, Grey or Black anchor resolved; all ${points.length} points were used as independent samples for a per-channel diagonal fit. Add role-labelled anchors for a more predictable result.`
+      );
+      fitSamples = points;
     }
-    const { scales, offsets } = fitDiagonalAffine(
-      fitPoints.length > 0 ? fitPoints : [points[0]]
-    );
+    const { scales, offsets } = fitDiagonalAffine(fitSamples);
     matrix = toMatrix(scales, offsets);
   }
 
@@ -435,10 +446,16 @@ export function calculateSimpleMatrixDetailed(points: ColorPoint[]): MatrixFitRe
       `This calibration clips about ${(assessment.clippingFraction * 100).toFixed(0)}% of typical colour channels; check the reference shot exposure.`
     );
   }
+  const residual = meanAbsoluteResidual(points, matrix);
+  if (residual > MAX_MEAN_RESIDUAL) {
+    warnings.push(
+      `This calibration does not reproduce its own samples (mean residual ${residual.toFixed(1)} DN). The correction may be inaccurate; check the patch samples or use Multi-Point mode.`
+    );
+  }
   const minLinear = minAnchorSeparation;
   return {
     matrix,
-    meanResidual: meanAbsoluteResidual(points, matrix),
+    meanResidual: residual,
     fellBackToSimple: false,
     warning: warnings[0],
     warnings,

@@ -4,14 +4,23 @@ import type { ColorPoint, CalibrationPreset } from '@/types/colorCorrector';
 import {
   PresetStorageError,
   buildTransientPreset,
+  deletePreset,
+  destructiveRevisionReason,
   exportPresetsToJson,
+  exportQuarantinedPresetsToJson,
   getAllPresets,
   getPresetRevision,
+  getQuarantinedPresetCount,
+  getQuarantinedPresets,
+  getRawPresetStorage,
   importPresetsFromJson,
   isPresetPersisted,
+  isPresetStorageCorrupt,
   savePreset,
 } from '@/lib/presetStorage';
 import { calculateMatrix } from '@/lib/colorCorrection';
+import { revisionFingerprint } from '@/lib/matrixFingerprint';
+import type { ColorMatrix } from '@/types/colorCorrector';
 
 const STORAGE_KEY = 'colorCorrector_presets';
 
@@ -47,6 +56,41 @@ function preset(points: ColorPoint[], name = 'Studio'): CalibrationPreset {
 const white = point('White', [220, 210, 200], [255, 255, 255], 'white');
 const grey = point('Grey', [120, 115, 110], [128, 128, 128], 'grey');
 const black = point('Black', [15, 12, 10], [0, 0, 0], 'black');
+
+const DESTRUCTIVE_MATRIX: ColorMatrix = {
+  matrix: [
+    [0.386, 0.386, 0.386],
+    [0.386, 0.386, 0.386],
+    [0.386, 0.386, 0.386],
+  ],
+  offset: { r: 0, g: 0, b: 0 },
+};
+
+/** Re-sign a stored revision around a different matrix so shape/fingerprint checks pass. */
+function withRevisionMatrix(
+  source: CalibrationPreset,
+  matrix: ColorMatrix,
+  id = source.id
+): CalibrationPreset {
+  const revision = source.revisions![0];
+  const forged = {
+    ...revision,
+    matrix,
+    fingerprint: revisionFingerprint({
+      algorithmVersion: revision.algorithmVersion,
+      mode: revision.mode,
+      points: revision.points,
+      matrix,
+    }),
+  };
+  return { ...source, id, name: `${source.name} (forged)`, matrix, revisions: [forged] };
+}
+
+function corruptFirstStoredRevision(): void {
+  const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  stored[0].revisions[0].fingerprint = '0000000000000000';
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+}
 
 beforeEach(() => {
   localStorage.clear();
@@ -93,12 +137,71 @@ describe('immutable revision storage', () => {
     expect(Array.isArray(revision?.provenance.warnings)).toBe(true);
   });
 
-  it('drops a preset whose stored revision fingerprint was tampered with', () => {
+  it('hides a corrupt record but preserves it verbatim when another preset is saved', () => {
     savePreset(preset([white, grey, black]));
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-    stored[0].revisions[0].fingerprint = '0000000000000000';
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+    corruptFirstStoredRevision();
     expect(getAllPresets()).toHaveLength(0);
+    expect(getQuarantinedPresetCount()).toBe(1);
+
+    savePreset({ ...preset([white, black], 'Other'), id: 'preset_other' });
+
+    expect(getRawPresetStorage()).toContain('0000000000000000');
+    expect(getQuarantinedPresetCount()).toBe(1);
+    expect(getAllPresets().map((p) => p.id)).toEqual(['preset_other']);
+  });
+
+  it('preserves corrupt records when an unrelated preset is deleted', () => {
+    savePreset(preset([white, grey, black]));
+    corruptFirstStoredRevision();
+    savePreset({ ...preset([white, black], 'Other'), id: 'preset_other' });
+
+    deletePreset('preset_other');
+
+    expect(getAllPresets()).toHaveLength(0);
+    expect(getQuarantinedPresetCount()).toBe(1);
+    expect(getRawPresetStorage()).toContain('0000000000000000');
+  });
+
+  it('preserves a quarantined record when saving a new preset with the same id', () => {
+    savePreset(preset([white, grey, black]));
+    corruptFirstStoredRevision();
+
+    savePreset(preset([white, black]));
+
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    expect(stored).toHaveLength(2);
+    expect(
+      stored.filter(
+        (entry: { revisions?: Array<{ fingerprint: string }> }) =>
+          entry.revisions?.[0].fingerprint === '0000000000000000'
+      )
+    ).toHaveLength(1);
+    expect(getAllPresets()).toHaveLength(1);
+  });
+
+  it('fails closed instead of overwriting an unparseable storage container', () => {
+    localStorage.setItem(STORAGE_KEY, '{not json');
+    expect(isPresetStorageCorrupt()).toBe(true);
+    expect(getAllPresets()).toEqual([]);
+
+    let thrown: unknown = null;
+    try {
+      savePreset(preset([white, black]));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(PresetStorageError);
+    expect((thrown as PresetStorageError).code).toBe('CORRUPT_STORAGE');
+    expect(getRawPresetStorage()).toBe('{not json');
+    expect(() => deletePreset('anything')).toThrow(/could not be read/);
+  });
+
+  it('exports quarantined records so they can be recovered', () => {
+    savePreset(preset([white, grey, black]));
+    corruptFirstStoredRevision();
+    const exported = JSON.parse(exportQuarantinedPresetsToJson());
+    expect(exported.quarantined).toHaveLength(getQuarantinedPresets().length);
+    expect(JSON.stringify(exported.quarantined)).toContain('0000000000000000');
   });
 });
 
@@ -157,6 +260,72 @@ describe('validation and migration (audit C19)', () => {
     });
     expect(() => savePreset(preset([white, black]))).toThrow(PresetStorageError);
     spy.mockRestore();
+  });
+});
+
+describe('destructive preset guardrails (review F4)', () => {
+  it('refuses to import a preset whose revision matrix would destroy colour', () => {
+    const saved = savePreset(preset([white, grey, black]));
+    const forged = withRevisionMatrix(saved, DESTRUCTIVE_MATRIX, 'preset_destructive');
+
+    expect(destructiveRevisionReason(forged.revisions![0])).not.toBeNull();
+    expect(destructiveRevisionReason(saved.revisions![0])).toBeNull();
+
+    const result = importPresetsFromJson(
+      JSON.stringify({ version: 2, presets: [forged] })
+    );
+    expect(result.imported).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(getAllPresets().some((p) => p.id === 'preset_destructive')).toBe(false);
+  });
+
+  it('refuses a legacy v1 preset with a destructive matrix on import', () => {
+    const result = importPresetsFromJson(
+      JSON.stringify({
+        version: 1,
+        presets: [
+          {
+            id: 'legacy_destructive',
+            name: 'Legacy destructive',
+            createdAt: 10,
+            updatedAt: 20,
+            points: [white, black],
+            matrix: DESTRUCTIVE_MATRIX,
+            mode: 'simple',
+          },
+        ],
+      })
+    );
+    expect(result).toEqual({ imported: 0, skipped: 1 });
+    expect(isPresetPersisted('legacy_destructive')).toBe(false);
+  });
+});
+
+describe('save path matrix/points agreement (review F6)', () => {
+  it('refuses a preset matrix that is not the fit for its points', () => {
+    const mismatched: CalibrationPreset = {
+      ...preset([white, grey, black]),
+      matrix: { matrix: [[1.1, 0, 0], [0, 1, 0], [0, 0, 0.95]], offset: { r: 0, g: 0, b: 0 } },
+    };
+    expect(() => savePreset(mismatched)).toThrow(/does not match the fit/);
+    expect(getAllPresets()).toHaveLength(0);
+
+    expect(() =>
+      buildTransientPreset({
+        name: 'Transient mismatch',
+        points: [white, grey, black],
+        matrix: mismatched.matrix,
+        mode: 'simple',
+      })
+    ).toThrow(PresetStorageError);
+  });
+
+  it('stores exactly the fit matrix for the points and mode', () => {
+    const saved = savePreset(preset([white, grey, black]));
+    const fit = calculateMatrix([white, grey, black], 'simple');
+    expect(saved.matrix).toEqual(fit);
+    expect(saved.revisions?.[0].matrix).toEqual(fit);
+    expect(saved.revisions?.[0].fingerprint).toMatch(/^[0-9a-f]{16}$/);
   });
 });
 

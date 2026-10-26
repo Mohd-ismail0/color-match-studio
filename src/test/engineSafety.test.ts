@@ -158,6 +158,47 @@ describe('role handling (audit C14/C15)', () => {
   });
 });
 
+describe('simple-mode custom points (review F1)', () => {
+  const patch = (
+    label: string,
+    sampled: [number, number, number],
+    target: [number, number, number]
+  ) => pt(label, sampled, target);
+
+  const chart = [
+    patch('chart patch A', [180, 120, 60], [190, 110, 70]),
+    patch('chart patch B', [80, 160, 90], [70, 170, 100]),
+    patch('chart patch C', [60, 90, 170], [50, 100, 180]),
+  ];
+
+  it('fits every role-less point instead of silently using only the first', () => {
+    const fit = calculateSimpleMatrixDetailed(chart);
+    const firstOnly = calculateSimpleMatrixDetailed([chart[0]]);
+    expect(fit.matrix).not.toEqual(firstOnly.matrix);
+    expect(fit.meanResidual).toBeGreaterThan(0);
+    expect(fit.meanResidual).toBeLessThanOrEqual(18);
+    expect(fit.warnings.join(' ')).toMatch(/No White, Grey or Black anchor/);
+  });
+
+  it('warns when the simple fit does not reproduce all of its samples', () => {
+    const contradictory = [
+      chart[0],
+      patch('chart patch B', [80, 160, 90], [10, 250, 20]),
+      patch('chart patch C', [60, 90, 170], [10, 250, 20]),
+    ];
+    const fit = calculateSimpleMatrixDetailed(contradictory);
+    expect(fit.meanResidual).toBeGreaterThan(18);
+    expect(fit.warnings.join(' ')).toMatch(/does not reproduce its own samples/);
+  });
+
+  it('keeps a single custom point as a per-channel scale with no offset', () => {
+    const fit = calculateSimpleMatrixDetailed([chart[0]]);
+    expect(fit.warnings.join(' ')).toMatch(/Only one calibration point/);
+    expect(fit.matrix.offset).toEqual({ r: 0, g: 0, b: 0 });
+    expect(applyColorMatrix(chart[0].targetColor, fit.matrix)).toBeDefined();
+  });
+});
+
 describe('matrix validation and finiteness (audit C7/C5)', () => {
   it('rejects non-finite offsets, unknown keys and out-of-bounds entries', () => {
     expect(
@@ -266,10 +307,9 @@ describe('transient revisions', () => {
     const preset = buildTransientPreset({
       name: 'Unsaved',
       points: [pt('White', [220, 220, 220], [255, 255, 255], 'white')],
-      matrix: {
-        matrix: [[1.2, 0, 0], [0, 1.2, 0], [0, 0, 1.2]],
-        offset: { r: 0, g: 0, b: 0 },
-      },
+      matrix: calculateSimpleMatrixDetailed([
+        pt('White', [220, 220, 220], [255, 255, 255], 'white'),
+      ]).matrix,
       mode: 'simple',
     });
     expect(preset.revisions).toHaveLength(1);

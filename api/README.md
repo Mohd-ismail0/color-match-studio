@@ -56,7 +56,7 @@ All `/v1/*` routes require `Authorization: Bearer <COLOR_API_KEY>`.
 | GET | `/v1/calibrations?limit=50` | List profiles with revision metadata |
 | GET | `/v1/calibrations/:id` | Profile + revision summaries |
 | POST | `/v1/calibrations/:id/revisions` | Append an immutable revision |
-| GET | `/v1/calibrations/:id/revisions/:n` | Fetch one explicit revision |
+| GET | `/v1/calibrations/:id/revisions/:n` | Fetch one explicit revision (`:n` must be canonical: `^[1-9][0-9]*$`) |
 | POST | `/v1/correct` | Correct a PNG/JPEG/WebP/TIFF with a revision or ad-hoc matrix |
 
 Create/append body:
@@ -99,8 +99,19 @@ or `{ "imageBase64": "...", "matrix": { ... } }` for ad-hoc matrices.
 
 A revision-based response includes `X-Calibration-Profile`,
 `X-Calibration-Revision` and `X-Calibration-Hash`. The stored revision is
-re-hashed and re-validated on every use; tampering yields `500
-REVISION_INTEGRITY`.
+re-hashed, re-validated and re-fit on every use: its matrix must equal the
+engine fit for its stored points, so rewriting the matrix — even with a
+recomputed content hash — yields `500 REVISION_INTEGRITY`. A stored revision
+that can only resolve to the engine's identity fallback is refused with `500
+REVISION_REJECTED` rather than used as a no-op correction. The hash and
+fingerprint are unkeyed detectors: a full-row rewrite by someone with database
+write access is outside this scheme's threat model.
+
+Create/append refuses a destructive fit with `422 MATRIX_REJECTED`. A `201`
+therefore always represents a usable correction; it is never an identity
+no-op written under a successful status. Revision path segments must be
+canonical positive integers — `01`, `1e0`, `1.0` and `+1` return `422
+INVALID_REQUEST`.
 
 ## Limits and safety
 
@@ -122,14 +133,16 @@ REVISION_INTEGRITY`.
 ## Fidelity contract (deliberately bounded)
 
 - All maths is in linear sRGB with one shared 16-bit LUT encode; browser and
-  API outputs are byte-identical for 8-bit images.
+  API outputs are pixel-identical for 8-bit images. File bytes differ because
+  the PNG encoders differ (`sharp` vs `canvas.toBlob`).
 - 8-bit output is PNG tagged with an sRGB ICC profile.
 - 16-bit input is preserved at 16 bits and encoded as a 16-bit PNG tagged with
   sRGB `gAMA`/`cHRM` (not a full ICC profile).
 - Untagged wide-gamut inputs are still assumed sRGB. There are **no ΔE /
   colorimetric reference fixtures**; the guardrails (rank/conditioning,
-  chromatic evidence, clipping, desaturation) reject destructive fits but do
-  not certify colour accuracy.
+  chromatic evidence, clipping, desaturation) reject destructive fits —
+  including the engine's identity fallback, which is refused with `422` — but
+  do not certify colour accuracy.
 
 ## Production gate: external PostgreSQL
 
@@ -150,7 +163,7 @@ Until then: one API instance, durable local disk, no horizontal scaling.
 ## Tests
 
 ```sh
-npm test              # 75 tests including engine, storage, UI selection and API e2e
+npm test              # 90 tests including engine, storage, UI selection and API e2e
 npm run acceptance    # real HTTP save → list → get → correct-by-revision
 npm run typecheck
 ```
