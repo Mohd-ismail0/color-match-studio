@@ -127,11 +127,14 @@ export async function handlePublicRoute(
     return false;
   }
 
-  const address = resolveClientAddress(
-    req.socket.remoteAddress,
-    req.headers['cf-connecting-ip'] ?? req.headers['x-forwarded-for'],
-    options.trustedProxies
-  );
+  // Precedence: an edge that sets a single-client header is more trustworthy
+  // than a comma list a client can prepend to. Both are only read when the TCP
+  // peer is a configured proxy.
+  const forwarded =
+    req.headers['cf-connecting-ip'] ??
+    req.headers['x-real-ip'] ??
+    req.headers['x-forwarded-for'];
+  const address = resolveClientAddress(req.socket.remoteAddress, forwarded, options.trustedProxies);
 
   const limited = (tier: keyof typeof RATE_LIMIT_TIERS, headers: Record<string, string> = {}) => {
     const decision = options.limiter.check(`${tier}:${address}`, RATE_LIMIT_TIERS[tier]);

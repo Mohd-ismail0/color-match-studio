@@ -254,6 +254,12 @@ describe('rate limiting', () => {
     expect(resolveClientAddress('10.0.0.1', '9.9.9.9, 203.0.113.9', ['10.0.0.1'])).toBe('203.0.113.9');
   });
 
+  it('prefers a single-client header over the comma list', () => {
+    // nginx/traefik append the peer to XFF; x-real-ip is the client itself.
+    expect(resolveClientAddress('10.0.0.1', '9.9.9.9', ['10.0.0.1'])).toBe('9.9.9.9');
+    expect(resolveClientAddress('203.0.113.5', '9.9.9.9', [])).toBe('203.0.113.5');
+  });
+
   it('groups IPv6 neighbours so one host cannot rotate addresses', () => {
     expect(rateLimitGroup('2001:db8:1234:5678:aaaa::1')).toBe(rateLimitGroup('2001:db8:1234:5678:ffff::9'));
     expect(rateLimitGroup('203.0.113.9')).toBe('203.0.113.9');
