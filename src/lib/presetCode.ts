@@ -11,7 +11,14 @@
  */
 
 export const PRESET_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
-export const PRESET_PREFIX = 'LC1-';
+export const PRESET_PREFIX = 'LC2-';
+
+/** One colour triplet: 3 channels × 6 bits = 19 significant bits, in 4 chars. */
+const TRIPLET_CHARS = 4;
+/** One patch: sampled + intended colour. */
+const PATCH_CHARS = TRIPLET_CHARS * 2;
+/** Checksum width. Must match the server's CHECKSUM_CHARS. */
+const CHECKSUM_CHARS = 4;
 
 export const PRESET_TIERS = {
   a: { minPoints: 1, maxPoints: 1 },
@@ -22,11 +29,41 @@ export const PRESET_TIERS = {
 
 export type PresetTier = keyof typeof PRESET_TIERS;
 
-export const PRESET_CHANNEL_STEP = 8;
+/**
+ * 6 bits per channel (steps of 4). Rounding to steps of 8 measurably shifted the
+ * fitted matrix away from the browser's own fit (up to 45/255 in the output),
+ * which would have made "correct in the browser" and "correct via the code"
+ * disagree. See src/test/presetParity.test.ts.
+ */
+export const PRESET_CHANNEL_STEP = 4;
+
+/**
+ * Roles travel with each patch because the engine's fit branches on
+ * white/grey/black anchors. Omitting them made the same card produce different
+ * images in the browser and via the code (measured: up to 59/255).
+ */
+export const PRESET_ROLES = ['white', 'grey', 'black', 'custom'] as const;
+export type PresetRole = (typeof PRESET_ROLES)[number];
 
 export interface PresetPatch {
   sampledColor: { r: number; g: number; b: number };
   targetColor: { r: number; g: number; b: number };
+  role: PresetRole;
+}
+
+/** 5 roles × 2 bits = 10 bits → 2 chars per group of five patches. */
+function rolesToBits(patches: PresetPatch[]): string {
+  const chars: string[] = [];
+  for (let i = 0; i < patches.length; i += 5) {
+    let packed = 0;
+    for (let j = 0; j < 5; j += 1) {
+      const patch = patches[i + j];
+      const index = patch ? PRESET_ROLES.indexOf(patch.role) : 0;
+      packed = (packed << 2) | (index < 0 ? 0 : index);
+    }
+    chars.push(PRESET_ALPHABET[(packed >> 5) & 31], PRESET_ALPHABET[packed & 31]);
+  }
+  return chars.join('');
 }
 
 export class PresetEncodeError extends Error {
@@ -41,14 +78,33 @@ export class PresetEncodeError extends Error {
 
 const clamp8 = (value: number): number => Math.max(0, Math.min(255, Math.round(value)));
 
+/**
+ * Round a channel to the precision the code can carry. Applied *before* fitting
+ * so the browser and the API fit from the same integers and produce identical
+ * matrices — matching them approximately is not enough, because the 8-bit
+ * encode is steep near black and turns tiny linear differences into tens of
+ * steps.
+ */
+export function quantiseChannel(value: number): number {
+  const six = Math.min(63, Math.max(0, Math.round(clamp8(value) / PRESET_CHANNEL_STEP)));
+  return six * PRESET_CHANNEL_STEP;
+}
+
+export function quantiseColour<T extends { r: number; g: number; b: number }>(color: T): T {
+  return {
+    ...color,
+    r: quantiseChannel(color.r),
+    g: quantiseChannel(color.g),
+    b: quantiseChannel(color.b),
+  };
+}
+
 function packTriplet(color: { r: number; g: number; b: number }): string {
-  // Quantise to 5 bits per channel, then pack: r in bits 14–10, g in 9–5, b in 4–0.
-  // The division must happen before the shift, and the quotient clamped to 31 so
-  // a 255 reading cannot overflow into the next channel.
-  const five = (value: number): number => Math.min(31, Math.round(clamp8(value) / PRESET_CHANNEL_STEP));
-  const packed = (five(color.r) << 10) | (five(color.g) << 5) | five(color.b);
+  // Quantise to 6 bits per channel, then pack: r in bits 17–12, g in 11–6, b in 5–0.
+  const six = (value: number): number => Math.min(63, Math.round(clamp8(value) / PRESET_CHANNEL_STEP));
+  const packed = (six(color.r) << 12) | (six(color.g) << 6) | six(color.b);
   let out = '';
-  for (let shift = 10; shift >= 0; shift -= 5) {
+  for (let shift = 15; shift >= 0; shift -= 5) {
     out += PRESET_ALPHABET[(packed >> shift) & 31];
   }
   return out;
@@ -139,7 +195,7 @@ function checksumChars(payload: string): string {
   for (let shift = 15; shift >= 0; shift -= 5) {
     out += PRESET_ALPHABET[(bits >> shift) & 31];
   }
-  return out;
+  return out.slice(0, CHECKSUM_CHARS);
 }
 
 export function encodePreset(patches: PresetPatch[], tier?: PresetTier): string {
@@ -168,10 +224,10 @@ export function encodePreset(patches: PresetPatch[], tier?: PresetTier): string 
     }
     seen.add(key);
   }
-  const body = patches
+  const colors = patches
     .map((patch) => packTriplet(patch.sampledColor) + packTriplet(patch.targetColor))
     .join('');
-  const payload = resolved + body;
+  const payload = resolved + rolesToBits(patches) + colors;
   return PRESET_PREFIX + payload + checksumChars(payload);
 }
 
@@ -181,7 +237,7 @@ export function encodePreset(patches: PresetPatch[], tier?: PresetTier): string 
  * strips spacing anyway.
  */
 export function formatPresetForDisplay(code: string): string {
-  const body = code.toUpperCase().replace(/[\s\-]/g, '');
-  if (!body.startsWith('LC1')) return code;
+  const body = code.toUpperCase().replace(/\s/g, '');
+  if (!body.startsWith('LC2')) return code;
   return PRESET_PREFIX + body.slice(3).replace(/(.{6})/g, '$1 ').trim();
 }

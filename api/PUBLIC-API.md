@@ -21,27 +21,43 @@ the same code into every job — and for a one-off user there is nothing to mana
 ## Format
 
 ```
-LC1-<T><PPPPPP…><CCCC>
+LC2-<T><RR><CCCCCCCC…><KKKK>
 ```
 
 | Part | Meaning |
 | --- | --- |
-| `LC1-` | version prefix; a future change gets `LC2-` rather than silently reinterpreting old codes |
+| `LC2-` | version prefix; a future change gets `LC3-` rather than silently reinterpreting old codes |
 | `T` | tier letter: `a` 1 point, `b` 2, `c` 3–5, `d` 6–12 |
-| `PPPPPP…` | 6 chars per patch: 3 for the measured colour, 3 for the intended colour |
-| `CCCC` | first 20 bits of SHA-256 over `<T><body>` |
+| `RR` | patch roles, 2 bits each, 5 patches per 2-char group |
+| `CCCCCCCC…` | 8 chars per patch: 4 for the measured colour, 4 for the intended colour |
+| `KKKK` | first 20 bits of SHA-256 over everything before it |
 
-Colours use 5 bits per channel (`step = 8`), packed r→g→b. Alphabet is Crockford-
-style without `I L O U`, so a code read aloud or retyped is unlikely to be
-ambiguous. The prefix is `LC1` plus a dash which the normaliser strips, so
-`lc1 - dyx…`, `LC1-DYX…` and `LC1DYX…` all decode to the same thing.
+Colours use 6 bits per channel (`step = 4`), packed r→g→b into 4 chars. Alphabet is
+Crockford-style without `I L O U`, so a code read aloud or retyped is unlikely to be
+ambiguous. Every dash and space is stripped before parsing, so `lc2 - d7kn…`,
+`LC2-D7KN…` and `LC2D7KN…` decode identically.
 
-A full 6-patch code is 45 characters — shorter than a URL and short enough to paste
-into a chat message:
+A full 6-patch code is 57 characters:
 
 ```
-LC1-DYYXZZZKKJGGG776000RAARAAAKDAKD6DN6DN39Y1
+LC2-D7KNQ7ZZZ460Y3XYZ0MA40C63618J650D2E2Q1Y2N29K91NHBS9RB
 ```
+
+### Two format changes that were not cosmetic
+
+**5 → 6 bits per channel.** With steps of 8, the quantised matrix differed enough
+from the browser's own fit to move output pixels by up to 45/255. Steps of 4 keep the
+code short enough to paste while staying inside a card reading's noise.
+
+**Roles are carried.** The engine branches on white/grey/black anchors, so the same
+six patches fitted without roles produced a visibly different image (up to 59/255 —
+gamma makes that gap large near black). The code now says which patch is which, and
+the parity test asserts a **0/255** difference against the browser's own path.
+
+The remaining rule for callers: **quantise before you fit.** `quantiseColour()` on
+both sides means both fit from identical integers. Fitting the raw values in the
+browser and the quantised ones on the server leaves two slightly different matrices,
+which is exactly the drift this format exists to prevent.
 
 ## Endpoints
 
@@ -53,12 +69,12 @@ keep the bearer key and stay private.
 Cheap validation: decode, re-fit, report. No image work.
 
 ```json
-{ "code": "LC1-DYYX…" }
+{ "code": "LC2-D7KN…" }
 ```
 
 ```json
 {
-  "code": "LC1-dYYX…",
+  "code": "LC2-d7KN…",
   "tier": "d",
   "points": 6,
   "residual": 7.78,
@@ -75,7 +91,7 @@ Returns a corrected PNG. Requires the shared access word in
 `X-Calibration-Word` (case- and whitespace-insensitive, compared in constant time).
 
 ```json
-{ "code": "LC1-DYYX…", "imageBase64": "iVBORw0KG…" }
+{ "code": "LC2-D7KN…", "imageBase64": "iVBORw0KG…" }
 ```
 
 Response headers: `X-Calibration-Tier`, `X-Calibration-Points`,
@@ -100,6 +116,8 @@ PUBLIC_CORRECTION_DISABLED` rather than quietly accepting anonymous work.
   described nothing usable.
 - **Integrity.** Checksum catches transcription damage; rejected points can never
   be fitted or surviving.
+- **Parity with the browser.** `src/test/presetParity.test.ts` fits the same card
+  both ways and demands byte-identical output.
 
 ## Rate limiting behind a proxy
 
@@ -146,6 +164,11 @@ patch was marked, because a colour-only card produces a fit that is hard to trus
 
 Encoding lives in `src/lib/presetCode.ts` and is compared byte-for-byte against the
 server encoder in `api/public.test.ts`, so the two cannot drift apart silently.
+The page quantises each measurement before encoding, and shows the quantised value,
+so the number a user reads is the number the code carries.
+
+Each patch also has a role selector (white/grey/black/colour). That is not
+decoration: role drives which fit the engine performs.
 
 ## Testing
 

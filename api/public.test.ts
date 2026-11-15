@@ -16,12 +16,12 @@ const AUTH = { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json
 
 /** Realistic card readings: warm-light cast, neutral patches should be neutral. */
 const cardPatches = [
-  { sampledColor: { r: 236, g: 228, b: 214 }, targetColor: { r: 255, g: 255, b: 255 } },
-  { sampledColor: { r: 128, g: 124, b: 118 }, targetColor: { r: 122, g: 122, b: 122 } },
-  { sampledColor: { r: 26, g: 24, b: 26 }, targetColor: { r: 12, g: 12, b: 12 } },
-  { sampledColor: { r: 196, g: 82, b: 74 }, targetColor: { r: 195, g: 62, b: 51 } },
-  { sampledColor: { r: 78, g: 132, b: 92 }, targetColor: { r: 60, g: 130, b: 82 } },
-  { sampledColor: { r: 74, g: 100, b: 168 }, targetColor: { r: 51, g: 96, b: 170 } },
+  { sampledColor: { r: 236, g: 228, b: 214 }, targetColor: { r: 255, g: 255, b: 255 }, role: 'white' as const },
+  { sampledColor: { r: 128, g: 124, b: 118 }, targetColor: { r: 122, g: 122, b: 122 }, role: 'grey' as const },
+  { sampledColor: { r: 26, g: 24, b: 26 }, targetColor: { r: 12, g: 12, b: 12 }, role: 'black' as const },
+  { sampledColor: { r: 196, g: 82, b: 74 }, targetColor: { r: 195, g: 62, b: 51 }, role: 'custom' as const },
+  { sampledColor: { r: 78, g: 132, b: 92 }, targetColor: { r: 60, g: 130, b: 82 }, role: 'custom' as const },
+  { sampledColor: { r: 74, g: 100, b: 168 }, targetColor: { r: 51, g: 96, b: 170 }, role: 'custom' as const },
 ];
 
 let dir: string;
@@ -86,6 +86,7 @@ describe('preset code', () => {
       const subset = Array.from({ length: count }, (_, index) => ({
         sampledColor: { r: (index * 19) % 250, g: (index * 37) % 250, b: (index * 53) % 250 },
         targetColor: { r: (index * 11) % 250, g: (index * 29) % 250, b: (index * 47) % 250 },
+        role: (['white', 'grey', 'black', 'custom'] as const)[index % 4],
       }));
       const tier = presetTierFor(count);
       expect(encodePresetBrowser(subset, tier)).toBe(encodePreset(tier, subset));
@@ -130,12 +131,12 @@ describe('preset code', () => {
   it('rejects a preset whose patches cannot form a usable matrix', () => {
     // Identical targets across wildly different samples cannot be fitted.
     const nonsense = [
-      { sampledColor: { r: 250, g: 10, b: 10 }, targetColor: { r: 0, g: 0, b: 0 } },
-      { sampledColor: { r: 10, g: 250, b: 10 }, targetColor: { r: 0, g: 0, b: 0 } },
-      { sampledColor: { r: 10, g: 10, b: 250 }, targetColor: { r: 0, g: 0, b: 0 } },
-      { sampledColor: { r: 250, g: 250, b: 10 }, targetColor: { r: 0, g: 0, b: 0 } },
-      { sampledColor: { r: 10, g: 250, b: 250 }, targetColor: { r: 0, g: 0, b: 0 } },
-      { sampledColor: { r: 250, g: 10, b: 250 }, targetColor: { r: 0, g: 0, b: 0 } },
+      { sampledColor: { r: 250, g: 10, b: 10 }, targetColor: { r: 0, g: 0, b: 0 }, role: 'white' as const },
+      { sampledColor: { r: 10, g: 250, b: 10 }, targetColor: { r: 0, g: 0, b: 0 }, role: 'black' as const },
+      { sampledColor: { r: 10, g: 10, b: 250 }, targetColor: { r: 0, g: 0, b: 0 }, role: 'grey' as const },
+      { sampledColor: { r: 250, g: 250, b: 10 }, targetColor: { r: 0, g: 0, b: 0 }, role: 'custom' as const },
+      { sampledColor: { r: 10, g: 250, b: 250 }, targetColor: { r: 0, g: 0, b: 0 }, role: 'custom' as const },
+      { sampledColor: { r: 250, g: 10, b: 250 }, targetColor: { r: 0, g: 0, b: 0 }, role: 'custom' as const },
     ];
     expect(() => assessPreset(encodePreset('d', nonsense))).toThrow(PresetError);
   });
@@ -207,8 +208,7 @@ describe('public routes', () => {
         mode: 'advanced',
         points: cardPatches.map((patch, index) => ({
           id: `p${index + 1}`,
-          label: `patch ${index + 1}`,
-          role: 'custom',
+          label: patch.role === 'custom' ? `patch ${index + 1}` : patch.role,
           x: index / cardPatches.length,
           y: 0.5,
           ...patch,

@@ -10,7 +10,13 @@ import { Badge } from '@/components/ui/badge';
 import { ColorPoint } from '@/types/colorCorrector';
 import { inferPointRole, rgbToHex, sampleColorFromCanvas } from '@/lib/colorCorrection';
 import { IMAGE_LIMITS } from '@/lib/calibrationLimits';
-import { encodePreset, formatPresetForDisplay, presetTierFor } from '@/lib/presetCode';
+import {
+  encodePreset,
+  formatPresetForDisplay,
+  presetTierFor,
+  quantiseColour,
+  type PresetRole,
+} from '@/lib/presetCode';
 import { Copy, Check, Upload, Crosshair, Trash2, Info, AlertTriangle } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -47,6 +53,7 @@ export default function PublicCalibrate() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [points, setPoints] = useState<EditablePoint[]>([]);
   const [code, setCode] = useState<string | null>(null);
+  const [roleHintShown, setRoleHintShown] = useState(false);
   const [encodeError, setEncodeError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const imageUrlRef = useRef<string | null>(null);
@@ -96,7 +103,13 @@ export default function PublicCalibrate() {
         if (!target) {
           throw new Error(`${point.label}: target colour must be a 6-digit hex value`);
         }
-        return { sampledColor: point.sampledColor, targetColor: target };
+        return {
+          // Quantise before encoding so the code reproduces exactly what the
+          // browser fitted, rather than approximately.
+          sampledColor: quantiseColour(point.sampledColor),
+          targetColor: quantiseColour(target),
+          role: (point.role ?? 'custom') as PresetRole,
+        };
       });
       const tier = presetTierFor(patches.length);
       setCode(encodePreset(patches, tier));
@@ -239,10 +252,30 @@ export default function PublicCalibrate() {
                         <Trash2 className="w-4 h-4" />
                       </Button>
                     </div>
+                    <div className="flex items-center gap-1">
+                      <Label htmlFor={`role-${point.id}`} className="text-xs text-muted-foreground">
+                        Patch
+                      </Label>
+                      <select
+                        id={`role-${point.id}`}
+                        className="h-8 flex-1 rounded-md border bg-background px-2 text-xs"
+                        value={point.role ?? 'custom'}
+                        onChange={(event) =>
+                          updatePoint(point.id, { role: event.target.value as PresetRole })
+                        }
+                      >
+                        <option value="white">White</option>
+                        <option value="grey">Grey</option>
+                        <option value="black">Black</option>
+                        <option value="custom">Colour</option>
+                      </select>
+                    </div>
                     <div className="grid grid-cols-2 gap-2 items-end">
                       <div className="space-y-1">
                         <Label className="text-xs text-muted-foreground">Measured</Label>
-                        <div className="text-xs font-mono">{rgbToHex(point.sampledColor)}</div>
+                        <div className="text-xs font-mono">
+                          {rgbToHex(quantiseColour(point.sampledColor))}
+                        </div>
                       </div>
                       <div className="space-y-1">
                         <Label htmlFor={`target-${point.id}`} className="text-xs">
@@ -301,8 +334,15 @@ export default function PublicCalibrate() {
                 <p className="text-xs text-muted-foreground flex items-start gap-1">
                   <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
                   Give this code to whoever corrects your photos, or paste it when correcting an image.
-                  It describes your measurements, not a fixed preset.
+                  It carries your measurements and each patch&apos;s role, not a fixed preset.
                 </p>
+                {points.length > 0 && neutralPoints === 0 && (
+                  <p className="text-xs text-amber-600 flex items-start gap-1">
+                    <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                    Mark your white, grey and black patches — without an anchor the correction is
+                    noticeably weaker, and a colour-only card cannot set exposure.
+                  </p>
+                )}
               </CardContent>
             </Card>
           </div>
