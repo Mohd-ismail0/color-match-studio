@@ -28,8 +28,16 @@ async function main(): Promise<void> {
   const port = runtimePort();
   const allowedOrigin = process.env.COLOR_API_ALLOWED_ORIGIN;
 
+  // Public routes are opt-in: without a word they stay closed. The value is
+  // never logged and is not the bearer key.
+  const publicPassphrase = process.env.COLOR_API_PUBLIC_PASSPHRASE?.trim() || undefined;
+  const trustedProxies = (process.env.COLOR_API_TRUSTED_PROXIES ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
   const { store } = await openStoreFromEnvironment();
-  const server = colorApi(key, { store, allowedOrigin });
+  const server = colorApi(key, { store, allowedOrigin, publicPassphrase, trustedProxies });
 
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error) => reject(error);
