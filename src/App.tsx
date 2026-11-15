@@ -7,6 +7,7 @@ import Index from "./pages/Index";
 import Calibrate from "./pages/Calibrate";
 import BatchProcess from "./pages/BatchProcess";
 import Presets from "./pages/Presets";
+import PublicCalibrate from "./pages/PublicCalibrate";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -20,6 +21,7 @@ const App = () => (
         <Routes>
           <Route path="/" element={<Index />} />
           <Route path="/calibrate" element={<Calibrate />} />
+          <Route path="/colour-code" element={<PublicCalibrate />} />
           <Route path="/batch" element={<BatchProcess />} />
           <Route path="/presets" element={<Presets />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}

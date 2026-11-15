@@ -12,6 +12,9 @@ import {
   type CalibrationStoreAdapter,
 } from './storeContract';
 import { WorkerPool, PoolError } from './workerPool';
+import { handlePublicRoute, validatePassphrase } from './publicRoutes';
+import { RateLimiter } from './rateLimiter';
+import { PresetError } from './preset';
 import { ImageError } from './imagePipeline';
 import {
   decodeBase64Strict,
@@ -37,6 +40,15 @@ export interface ColorApiOptions {
   queueTimeoutMs?: number;
   /** Restrict browser imports to this exact origin (default: local dev ports). */
   allowedOrigin?: string;
+  /**
+   * Word that opens /v1/public/correct. Omitted or empty → that route stays
+   * closed (503) rather than silently accepting anonymous work.
+   */
+  publicPassphrase?: string;
+  /** Peers allowed to set X-Forwarded-For / CF-Connecting-IP. */
+  trustedProxies?: readonly string[];
+  /** Injectable for tests; production gets its own in-memory limiter. */
+  publicLimiter?: RateLimiter;
 }
 
 export interface ColorApiServer extends Server {
@@ -210,6 +222,10 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
     queueTimeoutMs: options.queueTimeoutMs,
   });
   const allowedOrigin = options.allowedOrigin;
+  const publicLimiter = options.publicLimiter ?? new RateLimiter();
+  const publicPassphrase = options.publicPassphrase?.trim() || undefined;
+  if (publicPassphrase) validatePassphrase(publicPassphrase);
+  const trustedProxies = options.trustedProxies ?? [];
   const startedAt = Date.now();
   let shuttingDown = false;
 
@@ -291,6 +307,38 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
       if (!segments[0] || segments[0] !== 'v1') {
         throw new ApiError(404, 'NOT_FOUND', 'Unknown route');
       }
+
+      // Public, stateless routes are checked before authentication: they carry
+      // their own gating and never read or write stored calibrations.
+      const publicHandled = await handlePublicRoute(
+        req,
+        res,
+        requestId,
+        {
+          passphrase: publicPassphrase,
+          trustedProxies,
+          limiter: publicLimiter,
+          allowedOrigin,
+          accessLog,
+        },
+        {
+          runCorrection: async (image, matrix) => {
+            const result = await pool.run(image, matrix);
+            return {
+              png: result.png,
+              width: result.info.width,
+              height: result.info.height,
+              bitDepth: result.info.bitDepth,
+              sourceFormat: result.info.sourceFormat,
+            };
+          },
+          decodeBase64Strict,
+          readJsonBody,
+          sendJson,
+        },
+        pathname
+      );
+      if (publicHandled) return;
 
       const ip = clientIp(req);
       const failure = authFailures.get(ip);
@@ -491,6 +539,10 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
       code = error.code;
       message = error.message;
       headers = { ...error.headers };
+    } else if (error instanceof PresetError) {
+      status = error.code.startsWith('PRESET_') && (error.code === 'PRESET_MALFORMED' || error.code === 'PRESET_CHECKSUM' || error.code === 'PRESET_VERSION') ? 400 : 422;
+      code = error.code;
+      message = error.message;
     } else if (error instanceof StoreError) {
       status =
         error.code === 'NOT_FOUND'
