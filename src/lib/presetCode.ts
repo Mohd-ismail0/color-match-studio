@@ -30,12 +30,12 @@ export const PRESET_TIERS = {
 export type PresetTier = keyof typeof PRESET_TIERS;
 
 /**
- * 6 bits per channel (steps of 4). Rounding to steps of 8 measurably shifted the
- * fitted matrix away from the browser's own fit (up to 45/255 in the output),
- * which would have made "correct in the browser" and "correct via the code"
- * disagree. See src/test/presetParity.test.ts.
+ * 6 bits per channel, spread across the full 0–255 range (worst-case error
+ * ~2/255). Coarser coding measurably shifted the fitted matrix away from the
+ * browser's own fit, which would make "correct in the browser" and "correct via
+ * the code" disagree. See src/test/presetParity.test.ts.
  */
-export const PRESET_CHANNEL_STEP = 4;
+export const PRESET_CHANNEL_STEP = 255 / 63;
 
 /**
  * Roles travel with each patch because the engine's fit branches on
@@ -86,9 +86,15 @@ const clamp8 = (value: number): number => Math.max(0, Math.min(255, Math.round(v
  * steps.
  */
 export function quantiseChannel(value: number): number {
-  const six = Math.min(63, Math.max(0, Math.round(clamp8(value) / PRESET_CHANNEL_STEP)));
-  return six * PRESET_CHANNEL_STEP;
+  // 64 levels spread across the full 0–255 range so 255 stays representable.
+  // Quantising against a fixed step lands pure white on 252 and biases targets.
+  const level = Math.min(63, Math.max(0, Math.round((clamp8(value) * 63) / 255)));
+  return Math.round((level * 255) / 63);
 }
+
+/** 6-bit level for a channel; inverse of the expansion used when decoding. */
+const levelOf = (value: number): number =>
+  Math.min(63, Math.max(0, Math.round((clamp8(value) * 63) / 255)));
 
 export function quantiseColour<T extends { r: number; g: number; b: number }>(color: T): T {
   return {
@@ -101,8 +107,7 @@ export function quantiseColour<T extends { r: number; g: number; b: number }>(co
 
 function packTriplet(color: { r: number; g: number; b: number }): string {
   // Quantise to 6 bits per channel, then pack: r in bits 17–12, g in 11–6, b in 5–0.
-  const six = (value: number): number => Math.min(63, Math.round(clamp8(value) / PRESET_CHANNEL_STEP));
-  const packed = (six(color.r) << 12) | (six(color.g) << 6) | six(color.b);
+  const packed = (levelOf(color.r) << 12) | (levelOf(color.g) << 6) | levelOf(color.b);
   let out = '';
   for (let shift = 15; shift >= 0; shift -= 5) {
     out += PRESET_ALPHABET[(packed >> shift) & 31];

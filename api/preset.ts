@@ -101,7 +101,8 @@ export const PRESET_LIMITS = {
   /** Longest accepted code: tier + 12 patches + checksum. */
   maxLength: 1 + PRESET_TIERS.d.maxPoints * PATCH_CHARS + CHECKSUM_CHARS,
   /**
-   * Channels travel as 6 bits, i.e. steps of 4/255. An 8-bit canvas can produce
+   * Worst-case error from 6-bit coding is about 2/255 (levels are spread across
+   * the whole 0–255 range, so the step is 255/63 ≈ 4.05). An 8-bit canvas can produce
    * every integer 0–255, so rounding to steps of 8 shifted the fitted matrix
    * enough to move output pixels by up to 45/255 against the browser's own fit.
    * 6 bits keeps the code short while staying inside the noise floor of a card
@@ -172,6 +173,9 @@ export interface PresetAssessment {
 
 const clamp8 = (value: number): number => Math.max(0, Math.min(255, Math.round(value)));
 
+/** 6-bit level for a channel; the inverse of the expansion used when decoding. */
+const levelOf = (value: number): number => Math.min(63, Math.max(0, Math.round((clamp8(value) * 63) / 255)));
+
 /**
  * Round a channel to the precision the code can carry. The browser applies this
  * *before* fitting, so both sides fit from literally the same integers and the
@@ -180,8 +184,10 @@ const clamp8 = (value: number): number => Math.max(0, Math.min(255, Math.round(v
  * show as tens of steps.
  */
 export function quantiseChannel(value: number): number {
-  const six = Math.min(63, Math.max(0, Math.round(clamp8(value) / PRESET_LIMITS.channelStep)));
-  return six * PRESET_LIMITS.channelStep;
+  // 64 levels spread across the full 0–255 range so 255 is representable.
+  // Rounding 255/4 into 63 levels would land on 252 and quietly tell the engine
+  // that "white" is 252, biasing every target.
+  return Math.round((levelOf(value) * 255) / 63);
 }
 
 export function quantisePatch<T extends { sampledColor: RGB; targetColor: RGB }>(patch: T): T {
@@ -197,8 +203,7 @@ function packTriplet(color: RGB): string {
   // Quantise to 6 bits per channel, then pack: r in bits 17–12, g in 11–6, b in 5–0.
   // The division must happen before the shift, and the quotient clamped to 63 so
   // a 255 reading cannot overflow into the next channel.
-  const six = (value: number): number => Math.min(63, Math.round(clamp8(value) / PRESET_LIMITS.channelStep));
-  const packed = (six(color.r) << 12) | (six(color.g) << 6) | six(color.b);
+  const packed = (levelOf(color.r) << 12) | (levelOf(color.g) << 6) | levelOf(color.b);
   let out = '';
   for (let shift = 15; shift >= 0; shift -= 5) {
     out += PRESET_ALPHABET[(packed >> shift) & 31];
@@ -215,7 +220,7 @@ function unpackTriplet(chars: string): RGB {
     }
     packed = (packed << 5) | value;
   }
-  const expand = (six: number): number => six * PRESET_LIMITS.channelStep;
+  const expand = (level: number): number => Math.round((level * 255) / 63);
   const color = { r: expand((packed >> 12) & 63), g: expand((packed >> 6) & 63), b: expand(packed & 63) };
   if (color.r > 255 || color.g > 255 || color.b > 255) {
     throw new PresetError('PRESET_RANGE', 'Preset colour is outside the 0–255 range');

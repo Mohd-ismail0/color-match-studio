@@ -6,7 +6,14 @@ import path from 'node:path';
 import sharp from 'sharp';
 import { colorApi, type ColorApiServer } from './server';
 import { CalibrationStore } from './store';
-import { encodePreset, decodePreset, assessPreset, PresetError, PRESET_LIMITS } from './preset';
+import {
+  encodePreset,
+  decodePreset,
+  assessPreset,
+  PresetError,
+  PRESET_LIMITS,
+  quantiseChannel,
+} from './preset';
 import { encodePreset as encodePresetBrowser, presetTierFor } from '@/lib/presetCode';
 import { RateLimiter, resolveClientAddress, rateLimitGroup } from './rateLimiter';
 
@@ -110,6 +117,21 @@ describe('preset code', () => {
     }
   });
 
+  it('round-trips pure black and pure white exactly', () => {
+    // Quantising against a fixed step landed 255 on 252, which silently told the
+    // engine that "white" was 252 and biased every target.
+    expect(quantiseChannel(255)).toBe(255);
+    expect(quantiseChannel(0)).toBe(0);
+    expect(decodePreset(encodePreset('a', [cardPatches[0]])).patches[0].targetColor.r).toBe(255);
+    expect(decodePreset(encodePreset('a', [cardPatches[0]])).patches[0].targetColor.g).toBe(255);
+  });
+
+  it('never moves a channel by more than the coding error allows', () => {
+    for (let value = 0; value <= 255; value += 1) {
+      expect(Math.abs(quantiseChannel(value) - value)).toBeLessThanOrEqual(3);
+    }
+  });
+
   it('refuses repeated sampled colours', () => {
     const repeated = [cardPatches[0], cardPatches[0]];
     expect(() => encodePreset('b', repeated)).toThrow(/same colour|repeats/i);
@@ -193,6 +215,37 @@ describe('public routes', () => {
     expect(png.subarray(1, 4).toString()).toBe('PNG');
     const meta = await sharp(png).metadata();
     expect(meta.width).toBe(8);
+  });
+
+  it('closes public correction when no word is configured', async () => {
+    // Silence is not consent: an unset passphrase must refuse, not accept.
+    const store = new CalibrationStore(path.join(dir, 'noword.sqlite'));
+    const unconfigured = colorApi(KEY, { store });
+    await new Promise<void>((resolve) => unconfigured.listen(0, '127.0.0.1', resolve));
+    const address = unconfigured.address();
+    if (!address || typeof address === 'string') throw new Error('bind failed');
+    const code = encodePreset('d', cardPatches);
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/public/correct`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Calibration-Word': 'anything' },
+      body: JSON.stringify({ code, imageBase64 }),
+    });
+    expect(response.status).toBe(503);
+    const payload = (await response.json()) as { error: { code: string } };
+    expect(payload.error.code).toBe('PUBLIC_CORRECTION_DISABLED');
+    // Code validation is still useful without the word, so it stays open.
+    const preset = await fetch(`http://127.0.0.1:${address.port}/v1/public/preset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    expect(preset.status).toBe(200);
+    await unconfigured.shutdown();
+  });
+
+  it('rejects a passphrase that is too short or too repetitive', () => {
+    expect(() => colorApi(KEY, { store: new CalibrationStore(path.join(dir, 'x.sqlite')), publicPassphrase: 'abcd' })).toThrow(/at least 5/);
+    expect(() => colorApi(KEY, { store: new CalibrationStore(path.join(dir, 'x.sqlite')), publicPassphrase: 'aaaaaaa' })).toThrow(/distinct/);
   });
 
   it('needs the bearer key for stored calibration routes', async () => {

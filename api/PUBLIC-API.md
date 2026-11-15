@@ -32,7 +32,9 @@ LC2-<T><RR><CCCCCCCC…><KKKK>
 | `CCCCCCCC…` | 8 chars per patch: 4 for the measured colour, 4 for the intended colour |
 | `KKKK` | first 20 bits of SHA-256 over everything before it |
 
-Colours use 6 bits per channel (`step = 4`), packed r→g→b into 4 chars. Alphabet is
+Colours use 6 bits per channel — 64 levels spread across the full 0–255 range, so
+pure white and pure black are exact and worst-case error is ~2/255 — packed r→g→b
+into 4 chars. Alphabet is
 Crockford-style without `I L O U`, so a code read aloud or retyped is unlikely to be
 ambiguous. Every dash and space is stripped before parsing, so `lc2 - d7kn…`,
 `LC2-D7KN…` and `LC2D7KN…` decode identically.
@@ -46,8 +48,10 @@ LC2-D7KNQ7ZZZ460Y3XYZ0MA40C63618J650D2E2Q1Y2N29K91NHBS9RB
 ### Two format changes that were not cosmetic
 
 **5 → 6 bits per channel.** With steps of 8, the quantised matrix differed enough
-from the browser's own fit to move output pixels by up to 45/255. Steps of 4 keep the
-code short enough to paste while staying inside a card reading's noise.
+from the browser's own fit to move output pixels by up to 45/255. 6 bits keeps the
+code short enough to paste while staying inside a card reading's noise. The levels
+are spread across the whole range rather than stepped from zero: stepping put white
+on 252, quietly biasing every target by three counts.
 
 **Roles are carried.** The engine branches on white/grey/black anchors, so the same
 six patches fitted without roles produced a visibly different image (up to 59/255 —
