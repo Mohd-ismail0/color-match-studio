@@ -36,8 +36,24 @@ async function main(): Promise<void> {
     .map((entry) => entry.trim())
     .filter(Boolean);
 
+  // Built SPA to serve on this origin, and the Hosts that may still use the
+  // bearer-key routes. A public deployment sets both; an internal-only one
+  // sets neither and behaves exactly as before.
+  const webRoot = process.env.COLOR_API_WEB_ROOT?.trim() || undefined;
+  const managementHosts = (process.env.COLOR_API_MANAGEMENT_HOSTS ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
   const { store } = await openStoreFromEnvironment();
-  const server = colorApi(key, { store, allowedOrigin, publicPassphrase, trustedProxies });
+  const server = colorApi(key, {
+    store,
+    allowedOrigin,
+    publicPassphrase,
+    trustedProxies,
+    webRoot,
+    managementHosts,
+  });
 
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error) => reject(error);

@@ -149,6 +149,8 @@ when limits keyed on the socket.
 | `COLOR_API_PUBLIC_PASSPHRASE` | no | 5–64 chars, ≥3 distinct; opens `/v1/public/correct` |
 | `COLOR_API_TRUSTED_PROXIES` | no | comma-separated proxy addresses allowed to forward client IPs |
 | `COLOR_API_ALLOWED_ORIGIN` | no | single browser origin allowed to call the API |
+| `COLOR_API_WEB_ROOT` | no | directory of the built SPA to serve on this origin |
+| `COLOR_API_MANAGEMENT_HOSTS` | no | `Host` values that may reach `/v1/calibrations*` and `/v1/correct`; all others get 404 |
 
 Pick a word that is not a dictionary common noun and not your brand name: it is the
 only thing between an anonymous caller and CPU time. Rotating it invalidates
@@ -174,10 +176,43 @@ so the number a user reads is the number the code carries.
 Each patch also has a role selector (white/grey/black/colour). That is not
 decoration: role drives which fit the engine performs.
 
+The page makes no request to build a code: it reads the card and produces the
+string entirely in the browser. Serving it therefore needs no extra origin, no
+CORS allowance and no client-visible key.
+
+## Serving the page in production
+
+The image ships the built SPA and the API answers both on one origin:
+
+```
+COLOR_API_WEB_ROOT=/app/web
+```
+
+- `GET /`, `GET /colour-code`, … → static files, with `index.html` fallback for
+  client-side routes and immutable caching for Vite's `/assets/*` fingerprints.
+- `GET /health` → unchanged, reachable from any Host so the platform monitor works.
+- Anything under `/v1` keeps its normal behaviour.
+
+Then restrict the private surface to the hosts that should have it:
+
+```
+COLOR_API_MANAGEMENT_HOSTS=color-calibration-api,127.0.0.1
+```
+
+With that set, a request whose `Host` is the public domain gets `404 NOT_FOUND`
+for `/v1/calibrations*` and `/v1/correct` — the admin surface is *absent*, not
+merely locked, so exposing the browser tool never advertises a bearer-key route to
+the internet. Leaving the variable unset restores the previous behaviour
+(authorise every Host), which is what a private-only deployment wants.
+
+`Host` is not a forgery risk behind the tunnel: Cloudflare fixes it from the
+public hostname, and the router would not deliver a spoofed value to this service.
+
 ## Testing
 
 ```bash
-npx vitest run api/public.test.ts   # 20 tests: codes, routes, limits, proxying
+npx vitest run api/public.test.ts   # codes, routes, limits, proxying
+npx vitest run api/webSurface.test.ts  # static serving + host gating
 npx vitest run                     # full suite
 npm run typecheck && npm run build
 ```

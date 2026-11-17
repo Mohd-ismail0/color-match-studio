@@ -13,6 +13,7 @@ import {
 } from './storeContract';
 import { WorkerPool, PoolError } from './workerPool';
 import { handlePublicRoute, validatePassphrase } from './publicRoutes';
+import { serveStaticFile } from './staticFiles';
 import { RateLimiter } from './rateLimiter';
 import { PresetError } from './preset';
 import { ImageError } from './imagePipeline';
@@ -47,6 +48,21 @@ export interface ColorApiOptions {
   publicPassphrase?: string;
   /** Peers allowed to set X-Forwarded-For / CF-Connecting-IP. */
   trustedProxies?: readonly string[];
+  /**
+   * Directory holding the built single-page app. When set, GET requests that
+   * are not API routes are served from it on the same origin.
+   */
+  webRoot?: string;
+  /**
+   * Host values allowed to reach the bearer-key management routes
+   * (/v1/calibrations*, /v1/correct). When this list is non-empty, any other
+   * Host — including a public domain fronting the same container — receives
+   * 404 for those routes, so a browser-facing deployment never advertises the
+   * administration surface. Empty (the default) keeps every Host authorised,
+   * which is what local development and single-origin private deployments
+   * expect.
+   */
+  managementHosts?: readonly string[];
   /** Injectable for tests; production gets its own in-memory limiter. */
   publicLimiter?: RateLimiter;
 }
@@ -226,8 +242,27 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
   const publicPassphrase = options.publicPassphrase?.trim() || undefined;
   if (publicPassphrase) validatePassphrase(publicPassphrase);
   const trustedProxies = options.trustedProxies ?? [];
+  const webRoot = options.webRoot?.trim() || undefined;
+  const managementHosts = (options.managementHosts ?? [])
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
   const startedAt = Date.now();
   let shuttingDown = false;
+
+  /**
+   * True when this request's Host may use the bearer-key routes. With no
+   * allowlist configured every Host is accepted (single-origin deployments);
+   * otherwise the Host must match exactly, ignoring any port.
+   */
+  const isManagementHost = (req: IncomingMessage): boolean => {
+    if (managementHosts.length === 0) return true;
+    const host = (req.headers.host ?? '').trim().toLowerCase();
+    if (!host) return false;
+    const withoutPort = host.startsWith('[')
+      ? host.slice(0, host.indexOf(']') + 1)
+      : host.replace(/:\d+$/, '');
+    return managementHosts.includes(withoutPort);
+  };
 
   interface FailureWindow {
     count: number;
@@ -305,6 +340,14 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
       }
 
       if (!segments[0] || segments[0] !== 'v1') {
+        // Same-origin browser surface: when COLOR_API_WEB_ROOT points at a
+        // build output, the SPA is served by this very container, so a shop
+        // card can be loaded, processed or copied as a colour code without a
+        // second host to keep in sync.
+        if (webRoot && (req.method === 'GET' || req.method === 'HEAD')) {
+          const served = await serveStaticFile(res, webRoot, pathname, req.method);
+          if (served) return;
+        }
         throw new ApiError(404, 'NOT_FOUND', 'Unknown route');
       }
 
@@ -339,6 +382,13 @@ export function colorApi(key: string, options: ColorApiOptions = {}): ColorApiSe
         pathname
       );
       if (publicHandled) return;
+
+      // A public hostname may only ever reach the stateless public routes
+      // above. Anything that speaks to stored calibrations answers 404 here,
+      // so exposing the browser tool never advertises the admin surface.
+      if (!isManagementHost(req)) {
+        throw new ApiError(404, 'NOT_FOUND', 'Unknown route');
+      }
 
       const ip = clientIp(req);
       const failure = authFailures.get(ip);
