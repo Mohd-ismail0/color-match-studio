@@ -241,8 +241,16 @@ export function encodePreset(patches: PresetPatch[], tier?: PresetTier): string 
  * without it looks like something else entirely, and the API's normaliser
  * strips spacing anyway.
  */
+/**
+ * Groups the code for reading aloud or transcribing. Cosmetic only: removing
+ * the spaces must return the exact code, so what a user sees and what the copy
+ * button puts on the clipboard are the same value. Uppercasing here would have
+ * mangled the lowercase tier letter and re-kept the prefix dash, producing
+ * "LC2--D3FZG…" — accepted by the API (it normalises), but not a faithful
+ * display of the code that was built.
+ */
 export function formatPresetForDisplay(code: string): string {
-  const body = code.toUpperCase().replace(/\s/g, '');
-  if (!body.startsWith('LC2')) return code;
-  return PRESET_PREFIX + body.slice(3).replace(/(.{6})/g, '$1 ').trim();
+  const body = code.trim();
+  if (!body.startsWith(PRESET_PREFIX)) return code;
+  return PRESET_PREFIX + body.slice(PRESET_PREFIX.length).replace(/(.{6})/g, '$1 ').trim();
 }

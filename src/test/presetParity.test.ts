@@ -20,7 +20,7 @@ import { calculateMatrixDetailed, calculateMatrix, applyColorMatrix } from '@/li
 import { assessMatrix } from '@/lib/matrixValidation';
 import { applyMatrixToRgba8 } from '@/lib/colorMath';
 import { assessPreset, decodePreset, encodePreset } from '../../api/preset';
-import { encodePreset as encodePresetBrowser, presetTierFor, quantiseColour } from '@/lib/presetCode';
+import { encodePreset as encodePresetBrowser, formatPresetForDisplay, presetTierFor, quantiseColour } from '@/lib/presetCode';
 import type { ColorMatrix, ColorPoint } from '@/types/colorCorrector';
 
 /** A plausible card reading under warm indoor light. */
@@ -183,5 +183,17 @@ describe('browser and API agree on the same card', () => {
     const b = applyMatrix(image.data, matrix);
     expect(maxChannelDelta(a, b)).toBe(0);
     expect(nonAlphaDigest(a)).toBe(nonAlphaDigest(b));
+  });
+
+  it('what the page shows is the code, only grouped', () => {
+    // The copy button hands over the raw code; the readable block hands over
+    // formatPresetForDisplay(code). If those two ever diverge by more than the
+    // grouping spaces, a user transcribing the code gets a different
+    // calibration than the one the browser built.
+    const code = encodePresetBrowser(patches, 'd');
+    const display = formatPresetForDisplay(code);
+    expect(display.replace(/ /g, '')).toBe(code);
+    expect(() => decodePreset(display)).not.toThrow();
+    expect(decodePreset(display).tier).toBe('d');
   });
 });
